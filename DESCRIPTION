@@ -1,0 +1,10 @@
+Package: exotools
+Type: Package
+Title: Pileup Tools for ChIP-Exo Data
+Version: 1.0
+Date: 2014-12-01
+Author: Micah Gearhart
+Maintainer: Micah Gearhart <gearh006 'at' umn.edu>
+Description: More about what it does (maybe more than one line)
+License: beerware 
+Imports: Rsamtools
