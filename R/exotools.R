@@ -1,3 +1,7 @@
+f <- function (x) {
+  print(paste0("Hello ",as.character(x)))
+}
+
 p_param <- PileupParam(cycle_bins=c(0,1),
                        distinguish_nucleotides=FALSE,
                        distinguish_strands=TRUE,
