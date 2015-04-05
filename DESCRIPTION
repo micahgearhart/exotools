@@ -1,10 +1,14 @@
 Package: exotools
-Type: Package
 Title: Pileup Tools for ChIP-Exo Data
-Version: 1.0
-Date: 2014-12-01
-Author: Micah Gearhart
-Maintainer: Micah Gearhart <gearh006 'at' umn.edu>
-Description: More about what it does (maybe more than one line)
-License: beerware 
-Imports: Rsamtools
+Version: 0.1.0
+Date: 2015-04-04
+Authors@R: person("Micah", "Gearahrt", email =
+ "gearh006@umn.edu", role = c("aut", "cre"))
+Description: 
+ This package contains an annotated workflow for the DMRT1 
+ structure paper and some of the tools for analyzing ChIP-exo 
+ data with R.
+License: CCO
+Imports: 
+ Rsamtools
+
