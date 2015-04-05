@@ -3,12 +3,10 @@ p_param <- PileupParam(cycle_bins=c(0,1),
                        distinguish_strands=TRUE,
                        min_nucleotide_depth=1)
 
-pileupGR<- function(gr,fl,p_param=p_param) {
+pileupGR<- function(gr,fl) {
   
   size=width(gr[1])
   xlim<-c((size %/% 2)*-1,size %/% 2)
-  
-  
   
   #Widen gr by 50 to get data for the 5' end of hte bottom strand
   gr<-gr+50
@@ -80,3 +78,19 @@ pileupGR<- function(gr,fl,p_param=p_param) {
   return(p)
   
 }
+
+
+findsites <- function (pattern,seq) {
+  top_sites<-GRanges()
+  bot_sites<-GRanges()
+  temp<-matchPattern(DNAString(pattern),Mmusculus[[seq]],fixed="subject")
+  temp2<-matchPattern(reverseComplement(DNAString(pattern)),Mmusculus[[seq]],fixed="subject")
+#  print(paste0(seq," Plus strand:  ",length(temp)))
+#  print(paste0(seq," Minus strand:  ",length(temp2)))
+  if (length(temp) > 0) { top_sites<-GRanges(seqnames=seq,ranges=IRanges(start=start(temp),end=end(temp)),strand="+") } 
+  if (length(temp2) > 0) { bot_sites<-GRanges(seqnames=seq,ranges=IRanges(start=start(temp2),end=end(temp2)),strand="-") } 
+  return(suppressWarnings(c(top_sites,bot_sites)))
+}
+
+
+
