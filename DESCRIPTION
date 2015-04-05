@@ -10,5 +10,6 @@ Description:
  data with R.
 License: CCO
 Imports: 
- Rsamtools
-
+ Rsamtools,
+    tidyr,
+    dplyr

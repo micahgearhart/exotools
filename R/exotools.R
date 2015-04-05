@@ -2,7 +2,7 @@ f <- function (x) {
   print(paste0("Hello ",as.character(x)))
 }
 
-p_param <- PileupParam(cycle_bins=c(0,1),
+p_param <- Rsamtools::PileupParam(cycle_bins=c(0,1),
                        distinguish_nucleotides=FALSE,
                        distinguish_strands=TRUE,
                        min_nucleotide_depth=1)
@@ -14,8 +14,8 @@ pileupGR<- function(gr,fl) {
   
   #Widen gr by 50 to get data for the 5' end of hte bottom strand
   gr<-gr+50
-  sbp<-ScanBamParam(which=gr)
-  res<-pileup(fl, scanBamParam=sbp, pileupParam=p_param)
+  sbp<-Rsamtools::ScanBamParam(which=gr)
+  res<-Rsamtools::pileup(fl, scanBamParam=sbp, pileupParam=p_param)
   res[res$strand=="-","pos"]<-res[res$strand=="-","pos"]+49
   
   #create labels from gr to match results table
