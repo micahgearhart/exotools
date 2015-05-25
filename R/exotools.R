@@ -237,8 +237,8 @@ pileupGR<- function(gr,fl) {
   temp[temp$strand=="bottom",]$count<-temp[temp$strand=="bottom",]$count *-1
   y<-max(abs(temp$count))*1.2
   p<-ggplot(temp, aes(x = pos, y = count, group=strand, fill=strand)) +
-    geom_point() + geom_line()+
-    geom_area(position="dodge") + theme_bw() + xlim(xlim) +ylim(c(-y,y))
+    #geom_point() + geom_line()+
+    geom_area(position="dodge") + theme_classic() + xlim(xlim) +ylim(c(-y,y))
   
   return(p)
   
