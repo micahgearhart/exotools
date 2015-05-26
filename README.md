@@ -1,6 +1,6 @@
 # An ancient protein-DNA interaction underlying metazoan sex determination
 Micah D Gearhart  
-`r format(Sys.time(), '%d %B %Y')`  
+March 26th, 2015
 
   This document contains an annotated workflow of the informatics analyses
   including software settings and options, diagnostic plots of data quality and methods
