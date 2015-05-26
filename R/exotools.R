@@ -82,11 +82,7 @@ BamImportHuman = function (selection) {
   return(cov_gr)
 }
 
-#Define a default p_param
-p_param <- Rsamtools::PileupParam(cycle_bins=c(0,1),
-                       distinguish_nucleotides=FALSE,
-                       distinguish_strands=TRUE,
-                       min_nucleotide_depth=1)
+
 
 #plot GVIZ
 plotGviz <- function(mouse_gr) {
@@ -118,7 +114,7 @@ plotGviz <- function(mouse_gr) {
   #reduce temp to gene-size chunks
   temp<-reduce(temp,min.gapwidth=10000)
   #if more than one pick one with similar size to mgr
-  temp<-temp[which.min(abs(width(mgr)-width(temp)))]
+  temp<-temp[which.min(abs(IRanges::width(mgr)-IRanges::width(temp)))]
   hseq<-as.character(seqnames(temp))
   hstart<-min(start(temp))
   hend<-max(end(temp))
@@ -169,12 +165,13 @@ pileupGR<- function(gr,fl) {
   
   size=width(gr[1])
   xlim<-c((size %/% 2)*-1,size %/% 2)
+ 
   
-  #Widen gr by 50 to get data for the 5' end of hte bottom strand
-  gr<-gr+50
+  #Widen gr by ncycle to get data for the 5' end of the bottom strand
+  gr<-gr+ncycle
   sbp<-Rsamtools::ScanBamParam(which=gr)
   res<-Rsamtools::pileup(fl, scanBamParam=sbp, pileupParam=p_param)
-  res[res$strand=="-","pos"]<-res[res$strand=="-","pos"]+49
+  res[res$strand=="-","pos"]<-res[res$strand=="-","pos"]+ncycle-1
   
   #create labels from gr to match results table
   gr_labels<-paste0(seqnames(gr),":",start(gr),"-",end(gr))
@@ -216,21 +213,6 @@ pileupGR<- function(gr,fl) {
     mutate(pos=as.integer(pos)*-1) %>%
     dplyr::filter(pos >= xlim[1] & pos <= xlim[2]) 
   
-  # implement dplyer version of tapply
-  #res %>% group_by(rpos,rstrand) %>% 
-  #    summarize(count=sum(count)) %>%
-  #    gather(rstrand,count,top,bottom,na.rm=TRUE,convert=TRUE) %>%
-  #    mutate(rpos=as.integer(rpos)*-1) %>%
-  #    mutate(count[strand=="bottom"]=count*-1) %>%
-  #    dplyr::filter(rpos >= xlim[1] & rpos <= xlim[2]) %>%
-  
-  
-  #ggplot - stacked
-  #p<-ggplot(temp, aes(x = pos, y = count, colour = strand, group = strand)) +
-  #geom_line() + geom_point() + theme_bw() + xlim(xlim)
-  
-  #ggplot - flipped  & filled 
-  
   temp[temp$strand=="bottom",]$count<-temp[temp$strand=="bottom",]$count *-1
   y<-max(abs(temp$count))*1.2
   p<-ggplot(temp, aes(x = pos, y = count, group=strand, fill=strand)) +
@@ -240,19 +222,6 @@ pileupGR<- function(gr,fl) {
   return(p)
   
 }
-
-
-#findsites <- function (pattern,seq) {
-#  top_sites<-GRanges()
-#  bot_sites<-GRanges()
-#  temp<-matchPattern(DNAString(pattern),Mmusculus[[seq]],fixed="subject")
-#  temp2<-matchPattern(reverseComplement(DNAString(pattern)),Mmusculus[[seq]],fixed="subject")
-##  print(paste0(seq," Plus strand:  ",length(temp)))
-##  print(paste0(seq," Minus strand:  ",length(temp2)))
-#  if (length(temp) > 0) { top_sites<-GRanges(seqnames=seq,ranges=IRanges(start=start(temp),end=end(temp)),strand="+") } 
-#  if (length(temp2) > 0) { bot_sites<-GRanges(seqnames=seq,ranges=IRanges(start=start(temp2),end=end(temp2)),strand="-") } 
-#  return(suppressWarnings(c(top_sites,bot_sites)))
-#}
 
 
 findsites <- function (pattern,seq,build=Mmusculus) {
