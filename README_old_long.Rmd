@@ -1,0 +1,1734 @@
+---
+title: "Dmrt1 ChIP-Seq / ChIP-Exo"
+author: "micah gearhart"
+date: "11/13/2014"
+
+abstract: This document contains an annotated workflow of the informatics analyses including software settings and options, diagnostic plots of data quality and methods for statistical tests that can be reproduced in the R programming language.  The source code is available at https://github.com/micahgearhart/umn-gcd-bioinformatics-exo.
+
+output:
+  pdf_document:
+    toc: true
+    fig_caption: true
+    number_sections: true
+
+  html_document:
+    keep_md: yes
+---
+
+#Libraries
+## Load Software from bioconductor.org
+
+The following section loads software that has been previously downloaded from the Bioconductor repository.  For more information, please see http://bioconductor.org/install/.
+
+```{r libraries, results='hide', message=FALSE, warning=FALSE}
+#Graphics
+library(ggplot2)
+library(gridExtra)
+library(rtracklayer)
+library(GenomicFeatures)
+library(Gviz)
+library(TxDb.Mmusculus.UCSC.mm9.knownGene)
+library(TxDb.Hsapiens.UCSC.hg19.knownGene)
+library(Rsamtools)
+
+suppressMessages(library(BSgenome.Mmusculus.UCSC.mm9))
+suppressMessages(library(BSgenome.Hsapiens.UCSC.hg19))
+library(dplyr)
+library(tidyr)
+library(magrittr)
+library(downloader)
+library(BiocParallel)
+register(MulticoreParam(workers=detectCores()))
+library(motifStack)
+library(GenomicFiles)
+library(R.utils)
+library(ChIPpeakAnno)
+data(TSS.mouse.NCBIM37)
+library(org.Mm.eg.db)
+
+
+#h2m_chain<-import.chain("/usr/ngs/db/hg19ToMm9.over.chain")
+#m2h_chain<-import.chain("/usr/ngs/db/mm9ToHg19.over.chain")
+```
+
+#Setup
+## Define File locations
+```{r eval=FALSE}
+setClass("fileset", representation( filename="character",count="numeric",tx="TxDb"))
+
+#Define Mouse Chip Datasets
+mouse<-new("fileset", filename=c("bam/111007_L5_R1_Mouse_8w_input2.bam",
+                                 "bam/111007_L4_R1_Mouse_8w_chip2.bam",
+                                 "bam/111223_L4_R1_Mouse_8w_rep_2_input6.bam",
+                                 "bam/chip6.bam",
+                                 "/mnt/afp/murphy/data/mm9/exo_bwa2_r2.bam"))
+
+
+#mouse<-new("fileset", filename=c("/mnt/afp/murphy/data/mm9/M8W_input_dedup.bam",
+#"/mnt/afp/murphy/data/mm9/M8W_chip_dedup.bam","/mnt/afp/murphy/data/mm9/8R2_input_dedup.bam",
+#"/mnt/afp/murphy/data/mm9/8R2_chip_dedup.bam","/mnt/afp/murphy/data/mm9/exo_bwa2_r2.bam"))
+
+for (i in 1:length(mouse@filename)) {
+  mouse@count[i]<-countBam(mouse@filename[i],param=ScanBamParam(flag = scanBamFlag(isUnmappedQuery = FALSE,
+                            isFirstMateRead = FALSE,  isMinusStrand = TRUE)))$records }  
+mouse@tx<-TxDb.Mmusculus.UCSC.mm9.knownGene
+
+#Define Human Chip Datasets
+human<-new("fileset",filename=c("bam/110909_L2_R1_human_input1.bam",
+                                "bam/110909_L1_R1_human_chip1.bam",
+                                "bam/111223_L2_R1_human_input5.bam",
+                                "bam/111223_L1_R1_human_chip5.bam"))
+
+for (i in 1:length(human@filename)) {
+  human@count[i]<-countBam(human@filename[i],param=ScanBamParam(flag = scanBamFlag(isUnmappedQuery = FALSE,
+                            isFirstMateRead = FALSE,  isMinusStrand = TRUE)))$records }  
+human@tx<-TxDb.Hsapiens.UCSC.hg19.knownGene
+
+save(mouse,human,file="filesets.Rdata")
+```
+
+## gViz import Functions
+```{r}
+#modified from https://gist.github.com/sidderb/e485c634b386c115b2ef
+
+BamImport = function (species,selection=selection) {
+ require(Rsamtools)
+ Input1=species@filename[1]
+ ChIP1=species@filename[2]
+ Input2=species@filename[3]
+ ChIP2=species@filename[4]
+  
+    
+  #scan ChIP 
+  param = ScanBamParam(what = c("pos", "qwidth", "strand"), which = selection,
+                       flag = scanBamFlag(isUnmappedQuery = FALSE))
+	i1 = scanBam(Input1, param = param)[[1]]
+	c1 = scanBam(ChIP1, param = param)[[1]]
+	i2 = scanBam(Input2, param = param)[[1]]
+	c2 = scanBam(ChIP2, param = param)[[1]]
+  
+    
+  #Replicate 1
+	i1GR = GRanges(strand=i1[["strand"]], ranges=IRanges(i1[["pos"]],
+               width = i1[["qwidth"]]), seqnames=seqnames(selection)[1])
+	c1GR = GRanges(strand=c1[["strand"]], ranges=IRanges(c1[["pos"]],
+               width = c1[["qwidth"]]), seqnames=seqnames(selection)[1])
+  #Replicate 2
+	i2GR = GRanges(strand=i2[["strand"]], ranges=IRanges(i2[["pos"]],
+               width = i2[["qwidth"]]), seqnames=seqnames(selection)[1])
+	c2GR = GRanges(strand=c2[["strand"]], ranges=IRanges(c2[["pos"]],
+               width = c2[["qwidth"]]), seqnames=seqnames(selection)[1])
+
+	# calc coverage on both strands:
+	cov_list = list("Input1" = coverage(ranges(i1GR), width=end(selection)),
+                  "ChIP1" = coverage(ranges(c1GR), width=end(selection)),
+                  "Input2" = coverage(ranges(i2GR), width=end(selection)),
+                  "ChIP2" = coverage(ranges(c2GR), width=end(selection))) 
+  
+	pos = sort(unique(unlist(lapply(cov_list, function(y) c(start(y), end(y))))))
+
+	# build final GR
+	cov_gr = GRanges(seqnames = seqnames(selection)[1], 
+                   ranges=IRanges(start=head(pos, -1),end=tail(pos, -1)),
+		Input1=as.numeric(cov_list[["Input1"]][head(pos, -1)])*10e6/species@count[1],
+		ChIP1=as.numeric(cov_list[["ChIP1"]][head(pos, -1)])*10e6/species@count[2],
+		Input2=as.numeric(cov_list[["Input2"]][head(pos, -1)])*10e6/species@count[3],
+		ChIP2=as.numeric(cov_list[["ChIP2"]][head(pos, -1)])*10e6/species@count[4]
+      )
+	return(cov_gr)
+}
+```
+
+## GViz Plotting function for Mouse and Human
+```{r plotGviz}
+load("filesets.Rdata")
+AxisTrack <- GenomeAxisTrack()
+
+plotGviz <- function(mouse_gr) {
+  if (class(mouse_gr)== "character") {
+  mouse_gr<-gsub(",","",mouse_gr)
+  mseq<-sapply(strsplit(mouse_gr,":"),function(x) x[1])
+  temp<-sapply(strsplit(mouse_gr,":"),function(x) x[2])
+  mstart<-as.numeric(sapply(strsplit(temp,"-"),function(x) x[1]))
+  mend<-as.numeric(sapply(strsplit(temp,"-"),function(x) x[2]))
+  mgr<-GRanges(seq=mseq,IRanges(start=mstart,end=mend))
+  } else {
+    mgr<-mouse_gr
+    mseq<-as.character(seqnames(mgr))
+    mstart<-start(mgr)
+    mend<-end(mgr)
+  }  
+  print(mgr)
+  mChIP<-BamImport(mouse,mgr)
+  mTxTrack<-GeneRegionTrack(mouse@tx, chromosome = mseq, start = mstart, end = mend,name="UCSC")
+  #mIdeoTrack <- IdeogramTrack(genome = "mm9", chromosome = mseq) 
+  mChIP_Track<-DataTrack(mChIP,groups=c("Input1","ChIP1","Input2","ChIP2"),
+                         legend=TRUE,genome="mm9",name="Mouse ChIP-Seq (cpm)",
+                         chromosome=mseq, col=c("blue","purple","green","red"))
+
+  #human
+  suppressWarnings(temp<-unlist(liftOver(mgr,m2h_chain)))
+  hseq<-seqlevels(temp)
+  hstart<-min(start(temp))
+  hend<-max(end(temp))
+  hgr<-GRanges(seq=seqlevels(temp),IRanges(start=hstart,end=hend))
+  print(hgr)
+  hChIP<-BamImport(human,hgr)
+  hTxTrack<-GeneRegionTrack(human@tx, chromosome = hseq, start = hstart, end = hend,name="UCSC")
+  #hIdeoTrack <- IdeogramTrack(genome = "hg19", chromosome = hseq) 
+  hChIP_Track<-DataTrack(hChIP,groups=c("Input1","ChIP1","Input2","ChIP2"),
+                         legend=TRUE,genome="hg19",name="Human ChIP-Seq (cpm)",
+                         chromosome=hseq, col=c("blue","purple","green","red"))
+  
+  grid.newpage()
+  ncols<-2
+  nrows<-1
+  pushViewport(viewport(layout = grid.layout(nrows,ncols)))
+  pushViewport(viewport(layout.pos.col = 1 , layout.pos.row=1))
+  plotTracks(list(mChIP_Track,mTxTrack,AxisTrack), from = mstart, to = mend, type="a", col.histogram=NA, 
+             scale = 0.25, labelPos = "below",
+             cex.title=1, cex.axis=1, title.width=0.4,add=TRUE)
+  popViewport(1)
+
+  pushViewport(viewport(layout.pos.col = 2 , layout.pos.row=1))
+  plotTracks(list(hChIP_Track,hTxTrack,AxisTrack), from = hstart, to = hend, type="a", col.histogram=NA, 
+             scale = 0.25, labelPos = "below",
+             cex.title=1, cex.axis=1, title.width=0.4,add=TRUE)
+  popViewport(1)
+  
+}
+```
+PLots
+```{r}
+#meiob
+plotGviz("chr17:24,955,916-24,964,108")
+
+#sdc3
+plotGviz("chr4:130,356,152-130,360,903")
+
+#lrh
+plotGviz("chr1:138,807,639-138,816,433")
+```
+
+#Figure 1A - Plot ChIP-Seq Data
+```{r}
+#h2m_chain<-import.chain("/usr/ngs/db/hg19ToMm9.over.chain")
+#m2h_chain<-import.chain("/usr/ngs/db/mm9ToHg19.over.chain")
+
+hpeaks<-import("bam/dmrt1_human_chip1_pe5_peaks.bed")
+plot(density(hpeaks$score),xlim=c(0,200))
+length(hpeaks)
+h2mpeaks<-unlist(liftOver(hpeaks,h2m_chain))
+length(h2mpeaks)
+mpeaks<-import("../dmrt6/M8W_dedup_macs14_pe05_peaks.bed")
+seqlevels(h2mpeaks)
+hits<-findOverlaps(mpeaks,h2mpeaks,ignore.strand=F)
+
+conPeaks<-mpeaks[queryHits(hits)]
+conPeaks$humanScore<-h2mpeaks[subjectHits(hits)]$score
+conPeaks<-conPeaks[with(conPeaks,order(-humanScore))]
+conPeaks<-conPeaks[!duplicated(conPeaks$name)]
+library(ChIPPeakAnno)
+library(org.Mm.eg.db)
+data(TSS.mouse.NCBIM37)
+conPeaksAnno <- annotatePeakInBatch(as(conPeaks, "RangedData"), AnnotationData = TSS.mouse.NCBIM37, 
+    output = "both")
+conPeaksAnno <- addGeneIDs(conPeaksAnno, "org.Mm.eg.db", c("refseq", "symbol"))
+unique(conPeaksAnno$symbol)
+conPeaksAnno<-as.data.frame(conPeaksAnno)
+conPeaksAnno$label<-paste0("chr",conPeaksAnno$space,":",conPeaksAnno$start,"-",conPeaksAnno$end)
+conPeaks$label<-paste0(seqnames(conPeaks),":",start(conPeaks),"-",end(conPeaks))
+idx<-match(conPeaks$label,conPeaksAnno$label)
+conPeaks$symbol<-conPeaksAnno[idx,"symbol"]
+conPeaks$feature<-conPeaksAnno[idx,"feature"]
+conPeaks$distanceTSS<-conPeaksAnno[idx,"distancetoFeature"]
+
+```
+
+# ChIP-Exo
+
+## Define a Function to aggregate and plot ChIP-Exo Data
+```{r pileupGR}
+p_param <- PileupParam(cycle_bins=c(0,1),
+                       distinguish_nucleotides=FALSE,
+                       distinguish_strands=TRUE,
+                       min_nucleotide_depth=1)
+
+pileupGR<- function(gr,fl) {
+
+  size=width(gr[1])
+  xlim<-c((size %/% 2)*-1,size %/% 2)
+  
+  #Widen gr by 50 to get data for the 5' end of hte bottom strand
+  gr<-gr+50
+  sbp<-ScanBamParam(which=gr)
+  res<-pileup(fl, scanBamParam=sbp, pileupParam=p_param)
+  res[res$strand=="-","pos"]<-res[res$strand=="-","pos"]+49
+  
+  #create labels from gr to match results table
+  gr_labels<-paste0(seqnames(gr),":",start(gr),"-",end(gr))
+  idx<-match(sapply(strsplit(as.character(res$which_label),"\\."),function(x) x[1]),gr_labels)
+  #idx<-match(blah,gr_labels)
+  
+  #add start and strand info to results table
+  res$site_strand<-as.character(strand(gr[idx]))
+  res$start<-as.numeric(start(gr[idx]))
+
+  res$rpos<-999
+  plus_idx<-rownames(res[res$site_strand!="-",])
+  res[plus_idx,]$rpos<-(res[plus_idx,]$pos-res[plus_idx,]$start-width(gr[1])%/%2)*-1
+  
+  minus_idx<-rownames(res[res$site_strand=="-",])
+  res[minus_idx,]$rpos<-res[minus_idx,]$pos-res[minus_idx,]$start-width(gr[1])%/%2
+
+
+  #assign each count to top or bottom strand
+  res$rstrand<-"unknown_strand"
+  if ("*" %in% res$site_strand | "+" %in% res$site_strand) {
+  res[res$strand=="+" & res$site_strand!="-",]$rstrand<-"top"
+  res[res$strand=="-" & res$site_strand!="-",]$rstrand<-"bottom"
+  }
+  
+  if ("-" %in% res$site_strand) {
+  res[res$strand=="-" & res$site_strand=="-",]$rstrand<-"top"
+  res[res$strand=="+" & res$site_strand=="-",]$rstrand<-"bottom"
+  
+  }
+  
+  #use tapply to summarize
+  data<-as.data.frame(tapply(res$count,list(res$rpos,res$rstrand),sum))
+  data$pos<-rownames(data)
+  
+  #tidyr
+  temp <- data %>% 
+    gather(strand,count,top,bottom,na.rm=TRUE,convert=TRUE) %>%
+    mutate(pos=as.integer(pos)*-1) %>%
+    dplyr::filter(pos >= xlim[1] & pos <= xlim[2]) 
+  
+# implement dplyer version of tapply
+#res %>% group_by(rpos,rstrand) %>% 
+#    summarize(count=sum(count)) %>%
+#    gather(rstrand,count,top,bottom,na.rm=TRUE,convert=TRUE) %>%
+#    mutate(rpos=as.integer(rpos)*-1) %>%
+#    mutate(count[strand=="bottom"]=count*-1) %>%
+#    dplyr::filter(rpos >= xlim[1] & rpos <= xlim[2]) %>%
+
+  
+#ggplot - stacked
+  #p<-ggplot(temp, aes(x = pos, y = count, colour = strand, group = strand)) +
+  #geom_line() + geom_point() + theme_bw() + xlim(xlim)
+  
+#ggplot - flipped  & filled 
+
+  temp[temp$strand=="bottom",]$count<-temp[temp$strand=="bottom",]$count *-1
+  y<-max(abs(temp$count))*1.2
+  p<-ggplot(temp, aes(x = pos, y = count, group=strand, fill=strand)) +
+#     geom_point() + geom_line()+
+     geom_area(position="dodge") + theme_bw() + xlim(xlim) +ylim(c(-y,y))
+
+return(p)
+
+}
+```
+
+## Search the Mouse Genome for matches to the core 13mer
+```{r PWMsearch, eval=FALSE}
+detectCores()
+register(MulticoreParam(workers=detectCores()))
+fa<-readDNAStringSet("temp.fa")
+fa<-readDNAStringSet("~/dmrt1/exo/temp.fa")
+fa<-subseq(fa,3,15)
+pfm<-consensusMatrix(fa)
+pwm<-PWM(pfm)
+system.time(sites70<-matchPWM(pwm,Mmusculus,min.score="70%"))
+sites70<-keepSeqlevels(sites70,paste0("chr",c(1:19,"X","Y")))
+#system.time(d<-distanceToNearest(sites70))
+#str(d)
+#sites70$distance<-mcols(d)$distance
+
+expanded_sites$label<-paste0(seqnames(expanded_sites),":",start(expanded_sites),"-",end(expanded_sites))
+head(expanded_sites)
+sum(duplicated(expanded_sites$label))
+expanded_sites<-expanded_sites[!duplicated(expanded_sites$label)]
+length(expanded_sites)
+
+save(sites70,file="~/dmrt1/exo/sites70_13mer.rdata")
+```
+
+```{r 13mer}
+load("sites70_13mer.rdata")
+length(sites70[sites70$score > 0.90 & sites70$distance>100])
+length(sites70)
+
+table(strand(sites70))
+head(width(sites70))
+temp<-findOverlaps(sites70,d1p05,ignore.strand=T)
+length(temp)
+sites70_P<-sites70[queryHits(temp)]
+sites70_P$peak_score<-d1p05[subjectHits(temp)]$score
+length(sites70_P)
+sites70_P<-sites70_P+19
+#d<-distanceToNearest(sites70_P)
+#sites70_P$distance<-mcols(d)$distance
+table(seqnames(sites70_P))
+table(strand(sites70_P))
+head(width(sites70_P))
+rm(sites70)
+
+sites70_P$label<-paste0(seqnames(sites70_P),":",start(sites70_P),"-",end(sites70_P))
+head(sites70_P)
+sum(!duplicated(sites70_P$label))
+sites70_P<-sites70_P[!duplicated(sites70_P$label)]
+sites70_P<-sites70_P[,-2]
+length(sites70_P[sites70_P$distance > 25 & sites70_P$score > 0.75])
+sites70_PD<-sites70_P[sites70_P$distance > 25 & sites70_P$score > 0.75]
+sites70_PD<-extractDNAfromGR(sites70_PD)
+table(strand(sites70_PD))
+length(sites70_PD)
+```
+
+## Search the Genome for a Pattern Match to a half site
+Search with the in vitro PWM motif doesn't do a very good job of finding half sites.  Since a half site only contains 5 nucleotides we would expect to find that motif every 4^5 (1024) bases.  Try to find additional half sites under the data that are matches to "GNWACAW" with matchPattern instead of matchPWM.
+```{r}
+sites<-GRanges()
+for (seq in paste0("chr",c(1:19,"X","Y"))) {
+system.time(temp<-matchPattern(DNAString("GNWACAW"),Mmusculus[[seq]],fixed="subject"))
+gr<-GRanges(seqnames=seq,ranges = IRanges(start=start(temp),end=end(temp)),strand="+")
+print(paste0(seq," Plus strand:  ",length(temp)))  
+system.time(temp2<-matchPattern(reverseComplement(DNAString("GNWACAW")),Mmusculus[[seq]],fixed="subject"))
+gr2<-GRanges(seqnames=seq,ranges = IRanges(start=start(temp2),end=end(temp2)),strand="-") 
+print(paste0(seq," Minus strand:  ",length(temp2)))  
+sites<-suppressWarnings(c(sites,gr,gr2))
+}
+
+#temp<-sites[queryHits(findOverlaps(sites,nice_one,ignore.strand=T))]
+#temp<-promoters(temp,upstream=19,downstream=32)
+#temp$label<-paste0(seqnames(temp),":",start(temp),"-",end(temp))
+
+expanded_sites<-promoters(sites,upstream=19,downstream=32)
+table(strand(expanded_sites))
+
+expanded_sites$label<-paste0(seqnames(expanded_sites),":",start(expanded_sites),"-",end(expanded_sites))
+head(expanded_sites)
+sum(duplicated(expanded_sites$label))
+expanded_sites<-expanded_sites[!duplicated(expanded_sites$label)]
+length(expanded_sites)
+save(expanded_sites,file="pwm_sites.Rdata")
+# ADD DISTANCE TO NEAREST HERE?
+#temp<-findOverlaps(expanded_sites,d1p05,ignore.strand=T)
+#sitesP<-expanded_sites[queryHits(temp)]
+#sitesP$peak_score<-d1p05[subjectHits(temp)]$score
+#length(sitesP)
+#d<-distanceToNearest(sitesP)
+#sitesP$distance<-mcols(d)$distance
+#table(seqnames(sitesP))
+#table(strand(sitesP))
+
+#one NA?
+#sitesP[is.na(sitesP$distance)]$distance<-999
+#sitesP<-sitesP[sitesP$distance > 0]
+
+#sitesPD<-extractDNAfromGR(sitesP)
+
+#head(sitesPD$dna)
+```
+
+## Union of PWM and PM Granges
+```{r}
+load("pwm_sites.Rdata")
+load("sites70_13mer.rdata")
+#temp<-findOverlaps(sites70,expanded_sites,ignore.strand=T)
+#temp
+head(expanded_sites)
+head(sites70)
+
+
+
+
+load("sites13.rdata")
+d1p05 <- import("/mnt/afp/micah/R/dmrt6/M8W_dedup_macs14_pe05_peaks.bed")
+
+temp<-findOverlaps(sites,d1p05,ignore.strand=T)
+length(temp)
+sites<-sites[queryHits(temp)]
+sites$peak_score<-d1p05[subjectHits(temp)]$score
+length(sites)
+sites<-sites+19
+head(sites)
+#add label
+sites$label<-paste0(seqnames(sites),":",start(sites),"-",end(sites))
+
+#make disjoint
+sitesD<-disjoin(sites)
+sitesD<-sitesD[width(sitesD)==51]
+length(sitesD)
+sitesD$label<-paste0(seqnames(sitesD),":",start(sitesD),"-",end(sitesD))
+idx<-match(sitesD$label,sites$label)
+length(idx)
+sitesD$score<-sites[idx]$score
+sitesD$peak_score<-sites[idx]$peak_score
+sitesD$class<-"unknown"
+strand(sitesD)<-"*"
+sites<-sitesD
+rm(sitesD)
+
+#add DNA
+sites <- extractDNAfromGR(sites)
+head(sites)
+
+temp<-consensusMatrix(sites$dna)
+pfm<-new("pfm",mat=t(t(temp[1:4,])*1/colSums(temp[1:4,])), name="blah")
+plotMotifLogo(pfm)
+
+
+tetramer_gr<-subsetGRbyPattern(sites,DNAString("GNWACAWTGTWNC"))
+#temp<-consensusMatrix(tetramer_gr$dna)
+temp<-iupac_consensus("GNWACAWTGTWNC")
+plotMotifLogo(new("pfm",mat=t(t(temp[1:4,])*1/colSums(temp[1:4,])), name="tetramer"))
+tetramer_plot<-pileupGR(tetramer_gr, "/mnt/afp/murphy/data/mm9/exo_bwa2_r2.bam")
+
+dimer_gr<-subsetGRbyPattern(sites,DNAString("GNWACAWTGTWWD"))
+temp<-iupac_consensus("GNWACAWTGTWWD")
+plotMotifLogo(new("pfm",mat=t(t(temp[1:4,])*1/colSums(temp[1:4,])), name="Dimer"))
+dimer_plot<-pileupGR(dimer_gr, "/mnt/afp/murphy/data/mm9/exo_bwa2_r2.bam")
+
+trimer_gr<-subsetGRbyPattern(sites,DNAString("GNWACAWTGTWSD"))
+temp<-iupac_consensus("GNWACAWTGTWSD")
+#temp2<-consensusMatrix(trimer_gr$dna)
+plotMotifLogo(new("pfm",mat=t(t(temp[1:4,])*1/colSums(temp[1:4,])), name="Filter"))
+trimer_plot<-pileupGR(trimer_gr, "/mnt/afp/murphy/data/mm9/exo_bwa2_r2.bam")
+
+```
+
+
+```{r}
+quickExo<-function(pattern) {
+temp_con<-iupac_consensus(pattern)
+#plotMotifLogo(new("pfm",mat=t(t(temp_con[1:4,])*1/colSums(temp_con[1:4,])), name=pattern))
+
+temp_gr<-subsetGRbyPattern(sites,DNAString(pattern))
+temp_plot<-pileupGR(temp_gr, "/mnt/afp/murphy/data/mm9/exo_bwa2_r2.bam")
+temp_plot + annotate("text", x=0, y = 5, label = pattern)
+}
+```
+
+```{r}
+iupac_consensus<-function(pattern) {
+  temp<-matrix(nrow=4,ncol=nchar(pattern))
+  rownames(temp)<-c("A","C","G","T")
+  for ( i in 1:nchar(pattern)) {
+    letter<-IUPAC_CODE_MAP[substr(pattern,i,i)]
+    temp[,i]<-unlist(sapply(c("A","C","G","T"),function(x) as.numeric(grepl(x,letter))))
+  }
+  return(temp)
+}
+```
+
+
+```{r}
+  grid.newpage()
+  ncols<-1
+  nrows<-2
+  pushViewport(viewport(layout = grid.layout(nrows,ncols)))
+  pushViewport(viewport(layout.pos.col = 1 , layout.pos.row=1))
+  plotMotifLogo(new("pfm",mat=t(t(temp[1:4,])*1/colSums(temp[1:4,])), name="tetramer"))
+  popViewport(1)
+
+  pushViewport(viewport(layout.pos.col = 1 , layout.pos.row=2))
+#  pileupGR(tetramer_gr, "/mnt/afp/murphy/data/mm9/exo_bwa2_r2.bam")
+  plotMotifLogo(new("pfm",mat=t(t(temp[1:4,])*1/colSums(temp[1:4,])), name="tetramer"))
+  popViewport(1)
+  
+}
+```
+
+# Function to Extract DNAStringSet for GRanges object
+```{r}
+extractDNAfromGR <- function(gr) {
+#initialize the column
+gr$dna<-DNAStringSet("NNNN")
+
+# look through Chromosomes
+for (i in as.character(levels(seqnames(gr)))) {
+  idx<-as.logical(seqnames(gr)==i)
+gr[idx]$dna <- DNAStringSet(Mmusculus[[i]],start=start(gr[idx]),end=end(gr[idx]))
+}
+return(gr)
+}
+```
+
+
+```{r}
+pattern<-DNAString("GNTACNNNGTASD")
+subsetGRbyPattern<-function(gr,pattern) {
+  #pattern must match in the middle of gr
+  start<-(width(gr[1])-length(pattern)) %/% 2
+  #subseq(gr$dna,start+1,start+length(pattern))
+  if (pattern != reverseComplement(pattern)) {
+  idx<-vcountPattern(pattern,subseq(gr$dna,start+1,start+length(pattern)),fixed="subject")
+  print(paste0("Found ",sum(idx)," GRanges matching this pattern on the top strand"))
+  gr1<-gr[as.logical(idx)]
+  strand(gr1)<-"+"
+  #seqlogoDS(subseq(t4531[as.logical(idx)]$dna,start=40,width=23))
+  #strand(t4531[as.logical(idx)])<-"+"
+  idxRc<-vcountPattern(reverseComplement(pattern),subseq(gr$dna,start+1,start+length(pattern)),fixed="subject")
+  print(paste0("Found ",sum(idxRc)," GRanges matching this pattern on the bottom strand"))
+  gr2<-gr[as.logical(idxRc)]
+  strand(gr2)<-"-"
+  #strand(t4531[as.logical(idxRc)])<-"-"
+  #dna<-c(subseq(t4531[as.logical(idx)]$dna,start=40,width=23),
+  #reverseComplement(subseq(t4531[as.logical(idxRc)]$dna,start=40,width=23)))
+  #seqlogoDS(dna)
+  idx<-idx+idxRc
+  gr3<-c(gr1,gr2)
+  print(paste0("Found ",sum(idx)," GRanges matching this pattern."))
+  } else {
+  idx<-vcountPattern(pattern,subseq(gr$dna,start+1,start+length(pattern)),fixed="subject")
+  print(paste0("Found ",sum(idx)," GRanges matching this palindromic pattern"))
+  gr3<-gr[as.logical(idx)]
+  strand(gr3)<-"*"
+  #seqlogoDS(subseq(t4531[as.logical(idx)]$dna,start=40,width=23))
+  }
+#system.time(temp<-pileup2GR(t4531[as.logical(idx)]))
+#df2<-data.frame(pos=temp$pos,top_strand=temp$top_strand,bottom_strand=temp$bottom_strand)
+#df2<-melt(df2,id.vars="pos")
+return(gr3)
+}
+```
+
+
+#ADD DNA after this
+```{r}
+
+```
+
+
+## CRAZY!!!
+# Make a column in the GRanges to classify Site type.
+```{r crazy}
+
+dimer_gr<-subsetGRbyPattern(sites70_PD,DNAString("GNWACAWTGTWWD"))
+dimer_plot<-pileupGR(dimer_gr, "/mnt/afp/murphy/data/mm9/exo_bwa2_r2.bam")
+
+trimer_gr<-subsetGRbyPattern(sites70_PD,DNAString("GNWACAWTGTWSD"))
+trimer_plot<-pileupGR(trimer_gr, "/mnt/afp/murphy/data/mm9/exo_bwa2_r2.bam")
+
+tetramer_gr<-subsetGRbyPattern(sites70_PD,DNAString("GNWACAWTGTWNC"))
+tetramer_plot<-pileupGR(tetramer_gr, "/mnt/afp/murphy/data/mm9/exo_bwa2_r2.bam")
+
+pwm_comparison<-grid.arrange(dimer_plot,trimer_plot,tetramer_plot,ncol=1,main="PWM Sites")
+
+dimer_gr<-subsetGRbyPattern(sitesPD,DNAString("GNWACAWNNNWWD"))
+dimer_plot<-pileupGR(dimer_gr, "/mnt/afp/murphy/data/mm9/exo_bwa2_r2.bam")
+
+trimer_gr<-subsetGRbyPattern(sitesPD,DNAString("GNWACAWTGTWSD"))
+trimer_plot<-pileupGR(trimer_gr, "/mnt/afp/murphy/data/mm9/exo_bwa2_r2.bam")
+
+tetramer_gr<-subsetGRbyPattern(sites70_PD,DNAString("WWGWWACAWTGTWWCWW"))
+tetramer_plot<-pileupGR(tetramer_gr, "/mnt/afp/murphy/data/mm9/exo_bwa2_r2.bam")
+
+pm_comparison<-grid.arrange(dimer_plot,trimer_plot,tetramer_plot,ncol=1,main="PM Sites")
+
+```
+
+
+```{r}
+pdf(file="systematically_change_right_nucleotides.pdf",width=8.5,height=11,colormodel="cmyk")
+g20<-quickExo("GATACAATGTATC")
+g21<-quickExo("GATACATTGTATC")
+g22<-quickExo("GATACAGTGTATC")
+g23<-quickExo("GATACACTGTATC")
+grid.arrange(g20,g21,g22,g23,ncol=1,main="Zero")
+
+g24<-quickExo("GATACANAGTATC")
+g25<-quickExo("GATACANTGTATC")
+g26<-quickExo("GATACANGGTATC")
+g27<-quickExo("GATACANCGTATC")
+grid.arrange(g24,g25,g26,g27,ncol=1,main="One")
+
+#g28<-quickExo("GATACANTATATC")
+g29<-quickExo("GATACANTTTATC")
+g30<-quickExo("GATACANTGTATC")
+g31<-quickExo("GATACANTCTATC")
+grid.arrange(g29,g30,g31,ncol=1,main="Two")
+
+g32<-quickExo("GATACANTGAATC")
+g33<-quickExo("GATACANTGTATC")
+#g34<-quickExo("GATACANTGGATC")
+g35<-quickExo("GATACANTGCATC")
+grid.arrange(g32,g33,g35,ncol=1,main="Three")
+
+g35<-quickExo("GATACANTGTATC")
+g36<-quickExo("GATACANTGTTTC")
+g37<-quickExo("GATACANTGTGTC")
+g38<-quickExo("GATACANTGTCTC")
+grid.arrange(g35,g36,g37,g38,ncol=1,main="Four")
+
+g39<-quickExo("GATACANTGTAAC")
+g41<-quickExo("GATACANTGTATC")
+g42<-quickExo("GATACANTGTAGC")
+g43<-quickExo("GATACANTGTACC")
+grid.arrange(g39,g41,g42,g43,ncol=1,main="Five")
+
+g44<-quickExo("GATACANTGTATA")
+g45<-quickExo("GATACANTGTATT")
+g46<-quickExo("GATACANTGTATG")
+g47<-quickExo("GATACANTGTATC")
+grid.arrange(g44,g45,g46,g47,ncol=1,main="Six")
+dev.off()
+
+
+pdf(file="figure3_exo.pdf",width=8.5,height=11,colormodel="cmyk")
+ tetramerAC<- quickExo("GNNACAWTGTNAC") 
+ tetramerGC<- quickExo("GNNACAWTGTNGC") 
+ tetramerTC<- quickExo("GNNACAWTGTNTC") 
+ tetramerCC<- quickExo("GNNACAWTGTNCC") 
+
+ tetramer<-quickExo("GNWACAWTGTNWC") 
+   trimer<-quickExo("GNNACAWTGTNGD") 
+    dimer<-quickExo("GNNACAWTWTNWD") 
+grid.arrange(tetramer,trimer,dimer,ncol=1,main="Exo Patterns")
+
+
+
+grid.arrange(tetramerAC,tetramerGC,
+             tetramerTC,tetramerCC,ncol=1,main="Exo Patterns")
+
+
+SITE_A<-quickExo("GATACATTGTTGC")
+SITE_B<-quickExo("GATACATTGTTAC")
+SITE_C<-quickExo("GATACATTATTAA")
+grid.arrange(SITE_A,SITE_B,SITE_C,ncol=1,main="Exo Patterns")
+
+SITE_A<-quickExo("GNNACAWTGTWGC")
+SITE_B<-quickExo("GNNACAWTGTWAC")
+SITE_C<-quickExo("GNNACAWNANNWA")
+grid.arrange(SITE_A,SITE_B,SITE_C,ncol=1,main="Exo Patterns")
+
+SITE_A<-quickExo("NNNGNNACAWTGTWGCWSS")
+SITE_B<-quickExo("NNNGNNACAWTGTWACWWW")
+SITE_C<-quickExo("NNNGNNACANNANNWAWWW")
+grid.arrange(SITE_A,SITE_B,SITE_C,ncol=1,main="Exo Patterns")
+
+
+```
+
+```{r}
+m6peaks<-read.table("/mnt/afp/micah/R/umn-gcd-bioinformatics-exo/bam/mouse6_peaks.narrowPeak",stringsAsFactors = FALSE)
+m6<-GRanges(seqnames=m6peaks$V1,ranges = IRanges(start=m6peaks$V2,end=m6peaks$V3),
+            strand="*",score=m6peaks$V5,e=m6peaks$V7,summit=m6peaks$V10)
+m2peaks<-read.table("/mnt/afp/micah/R/umn-gcd-bioinformatics-exo/bam/mouse2_peaks.narrowPeak",stringsAsFactors = FALSE)
+m2<-GRanges(seqnames=m2peaks$V1,ranges = IRanges(start=m2peaks$V2,end=m2peaks$V3),
+            strand="*",score=m2peaks$V5,e=m2peaks$V7,summit=m2peaks$V10)
+temp<-findOverlaps(m2,m6,ignore.strand=TRUE)
+m<-m2[queryHits(temp)]
+m$score2<-m6[subjectHits(temp)]$score
+m$e2<-m6[subjectHits(temp)]$e
+#m<-m[m$score > 50 & m$score2 > 50]
+#plot(m$score,m$score2,cex=0.2,pch=19)
+
+#load("pm_sites.rdata")
+load("/mnt/afp/micah/R/umn-gcd-bioinformatics-exo/112514_pm_sites.rdata")
+#tetramer_sites<-unlist(GRangesList(tetramer_sites))
+#trimer_sites<-unlist(GRangesList(trimer_sites))
+#dimer_sites<-unlist(GRangesList(dimer_sites))
+
+pdf(file="figure3_exo_112614.pdf",width=8.5,height=11,colormodel="cmyk")
+temp<-findOverlaps(tetramer_sites,m[m$score > 50 & m$score2 > 50])
+tet50<-tetramer_sites[queryHits(temp)]
+length(tet50)
+g1<-pileupGR(tet50+14, "/mnt/afp/murphy/data/mm9/exo_bwa2_r2.bam") + 
+  annotate("text", x=0, y = 5, label = "GNNACAWTGTNWC") +
+  annotate("text", x=-15, y = 13000, label = paste0(length(tet50)," sites")) 
+
+g1c<-pileupGR(tet50+14, fl) + 
+  annotate("text", x=0, y = 5, label = "GNNACAWTGTNWC") 
+#  annotate("text", x=-15, y = 13000, label = paste0(length(tet50)," sites")) 
+  
+
+temp<-findOverlaps(trimer_sites,m[m$score > 50 & m$score2 > 50])
+tri50<-trimer_sites[queryHits(temp)]
+length(tri50)
+g2<-pileupGR(tri50+14, "/mnt/afp/murphy/data/mm9/exo_bwa2_r2.bam") +
+  annotate("text", x=0, y = 5, label = "GNNACAWTGTNGD") 
+#  annotate("text", x=-15, y = 1300, label = paste0(length(tri50)," sites")) 
+
+g2c<-pileupGR(tri50+14,fl) +
+  annotate("text", x=0, y = 5, label = "GNNACAWTGTNGD") 
+
+temp<-findOverlaps(dimer_sites,m[m$score > 50 & m$score2 > 50])
+dimer50<-dimer_sites[queryHits(temp)]
+length(dimer50)
+g3<-pileupGR(dimer50+14, "/mnt/afp/murphy/data/mm9/exo_bwa2_r2.bam") +
+  annotate("text", x=0, y = 5, label = "GNNACAWTHTNND") 
+#  annotate("text", x=-15, y = 2500, label = paste0(length(dimer50)," sites")) 
+
+g3c<-pileupGR(dimer50+14, fl) +
+  annotate("text", x=0, y = 5, label = "GNNACAWTHTNND") 
+
+pdf(file="chipseq_pileup.pdf",width=8.5,height=11,colormodel="cmyk")
+grid.arrange(g1c,g2c,g3c,ncol=1)
+dev.off()
+
+#table(width(tetramer_sites))
+#tetramer_sites<-extractDNAfromGR(tetramer_sites)
+#temp<-consensusMatrix(tetramer_sites$dna)
+#plotMotifLogo(new("pfm",mat=t(t(temp[1:4,])*1/colSums(temp[1:4,])), name="tetramer"))
+#pileupGR(tet50+14, "/mnt/afp/murphy/data/mm9/exo_bwa2_r2.bam")
+```
+
+```{r}
+tri50p<-extractDNAfromGR(tri50+14)
+tri50p[strand(tri50p)=="-"]$dna<-reverseComplement(tri50p[strand(tri50p)=="-"]$dna)
+temp<-consensusMatrix(tri50p$dna)
+trimerMotif<-new("pfm",mat=t(t(temp[1:4,])*1/colSums(temp[1:4,])), name="trimer")
+writeXStringSet(subseq(tri50p$dna,12,30),file="trimersites.fa")
+
+dimer50p<-extractDNAfromGR(dimer50+14)
+dimer50p[strand(dimer50p)=="-"]$dna<-reverseComplement(dimer50p[strand(dimer50p)=="-"]$dna)
+temp<-consensusMatrix(dimer50p$dna)
+dimerMotif<-new("pfm",mat=t(t(temp[1:4,])*1/colSums(temp[1:4,])), name="Dimer")
+writeXStringSet(subseq(dimer50p$dna,12,30),file="dimersites.fa")
+
+tet50p<-extractDNAfromGR(tet50+14)
+tet50p[strand(tet50p)=="-"]$dna<-reverseComplement(tet50p[strand(tet50p)=="-"]$dna)
+temp<-consensusMatrix(tet50p$dna)
+tetMotif<-new("pfm",mat=t(t(temp[1:4,])*1/colSums(temp[1:4,])), name="tetramer")
+writeXStringSet(subseq(tet50p$dna,12,30),file="tetramersites.fa")
+
+plotMotifLogoStack(list(dimerMotif,trimerMotif,tetMotif))
+
+```
+
+```{r}
+#human<-chr1:199,964,121-200,164,120
+nr5a2H<-GRanges(seqnames="chr1",IRanges(start=199964121,end=200164120))
+temp<-unlist(liftOver(nr5a2H,h2m_chain))
+temp<-temp[seqnames(temp)=="chr1"]
+nr5a2M<-GRanges(seqnames="chr1",IRanges(start=min(start(temp)), end=max(end(temp))))
+nr5a2M<-nr5a2M+(width(nr5a2H)-width(nr5a2M)) %/% 2          
+
+mChIP<-BamImport(mouse,nr5a2M)
+mseq<-"chr1"
+(mstart<-start(nr5a2M))
+(mend<-end(nr5a2M))
+mTxTrack<-GeneRegionTrack(mouse@tx, chromosome = mseq, start = mstart, end = mend,name="UCSC")
+  mIdeoTrack <- IdeogramTrack(genome = "mm9", chromosome = mseq) 
+  mChIP_Track<-DataTrack(mChIP,groups=c("Input1","ChIP1","Input2","ChIP2"),
+                         legend=TRUE,genome="mm9",name="Mouse ChIP-Seq (cpm)",
+                         chromosome=mseq, col=c("blue","purple","green","red"))
+plotTracks(list(mIdeoTrack,mChIP_Track,mTxTrack,AxisTrack), from = mstart, to = mend, type="a", col.histogram=NA, 
+             scale = 0.25, labelPos = "below",
+             cex.title=1, cex.axis=1, title.width=0.4)
+
+hChIP<-BamImport(mouse,nr5a2M)
+hseq<-"chr1"
+(hstart<-start(nr5a2H))
+(hend<-end(nr5a2H))
+hChIP<-BamImport(human,nr5a2H)
+  hTxTrack<-GeneRegionTrack(human@tx, chromosome = hseq, start = hstart, end = hend,name="UCSC")
+  hIdeoTrack <- IdeogramTrack(genome = "hg19", chromosome = hseq) 
+  hChIP_Track<-DataTrack(hChIP,groups=c("Input1","ChIP1","Input2","ChIP2"),
+                         legend=TRUE,genome="hg19",name="Human ChIP-Seq (cpm)",
+                         chromosome=hseq, col=c("blue","purple","green","red"))
+
+plotTracks(list(hIdeoTrack,hChIP_Track,hTxTrack,AxisTrack), from = hstart, to = hend, type="a", col.histogram=NA, 
+             scale = 0.25, labelPos = "below",
+             cex.title=1, cex.axis=1, title.width=0.4)
+```
+
+```{r}
+
+
+#download("http://www.broadinstitute.org/~anshul/projects/mouse/blacklist/mm9-blacklist.bed.gz",
+         destfile="mm9-blacklist.bed.gz")
+#gunzip("mm9-blacklist.bed.gz")
+mBL <-import("mm9-blacklist.bed")
+
+m2<-m[!m%over%mBL]
+temp<-ecdf(m2$score)
+plot(ecdf(m2$score),pch=19,cex=0.3)
+abline(v=quantile(m2$score,5/6,type=1),col="red")
+m2top<-m2[m2$score > quantile(m2$score,5/6,type=1)]
+m2summit<-GRanges(seqnames(m2top),IRanges(start=start(m2top)+m2top$summit-50,width=100))
+m2summit<-extractDNAfromGR(m2summit)
+temp<-m2summit$dna
+names(temp)<-paste0(seqnames(m2summit),":",start(m2summit),"-",end(m2summit))
+writeXStringSet(temp,file="mouse_summits.fa")
+system("/usr/ngs/bin/meme_4.9/bin/meme mouse_summits.fa -oc mouse_meme -maxsize 100000000 -text -dna -revcomp -w 13")
+
+#temp<-read.table("../meme/mouseSextile_sites.out",stringsAsFactors=FALSE)
+temp<-read.table("../meme/itasca_mouseSextile_sites.out",stringsAsFactors=FALSE)
+temp$seq<-sapply(strsplit(temp$V1,":"),function(x) x[1])
+temp$pos<-sapply(strsplit(temp$V1,":"),function(x) x[2])
+temp$pos<-as.integer(sapply(strsplit(temp$pos,"-"),function(x) x[1]))+temp$V3
+#temp[temp$V2=="+",]$pos<-temp[temp$V2=="+",]$pos-1
+#temp[temp$V2=="-",]$pos<-temp[temp$V2=="-",]$pos+1
+mouse_meme<-GRanges(seqnames=temp$seq,IRanges(start=temp$pos-3,width=17),strand=temp$V2)
+table(strand(mouse_meme))
+mouse_meme<-extractDNAfromGR(mouse_meme)
+#mouse_meme<-DNAStringSet(temp$V6)
+head(mouse_meme$dna)
+table(width(mouse_meme$dna))
+idx<-subseq(mouse_meme$dna,3,3)!="G" & subseq(mouse_meme$dna,15,15)=="C"
+table(idx)
+mouse_meme[idx]$dna<-reverseComplement(mouse_meme[idx]$dna)
+mean(subseq(mouse_meme$dna,3,3)=="G")
+mean(subseq(mouse_meme$dna,15,15)=="C")
+temp<-consensusMatrix(mouse_meme$dna)
+mouseMotif<-new("pfm",mat=t(t(temp[1:4,])*1/colSums(temp[1:4,])), name="Mouse MEME Motif")
+plotMotifLogo(mouseMotif)
+writeXStringSet(mouse_meme$dna,file="mouse_meme.fa")
+
+#human
+temp<-read.table("../meme/itasca_humanSextile_sites.out",stringsAsFactors=FALSE)
+temp$seq<-sapply(strsplit(temp$V1,":"),function(x) x[1])
+temp$pos<-sapply(strsplit(temp$V1,":"),function(x) x[2])
+temp$pos<-as.integer(sapply(strsplit(temp$pos,"-"),function(x) x[1]))+temp$V3
+#temp[temp$V2=="+",]$pos<-temp[temp$V2=="+",]$pos-1
+#temp[temp$V2=="-",]$pos<-temp[temp$V2=="-",]$pos+1
+human_meme<-GRanges(seqnames=temp$seq,IRanges(start=temp$pos-3,width=17),strand=temp$V2)
+table(strand(human_meme))
+human_meme$dna<-DNAStringSet("NNNN")
+# look through Chromosomes
+for (i in as.character(levels(seqnames(human_meme)))) {
+  idx<-as.logical(seqnames(human_meme)==i)
+human_meme[idx]$dna <- DNAStringSet(Hsapiens[[i]],start=start(human_meme[idx]),end=end(human_meme[idx]))
+}
+
+
+#mouse_meme<-DNAStringSet(temp$V6)
+head(human_meme$dna)
+table(width(human_meme$dna))
+idx<-subseq(human_meme$dna,3,3)!="G" & subseq(human_meme$dna,15,15)=="C"
+table(idx)
+human_meme[idx]$dna<-reverseComplement(human_meme[idx]$dna)
+mean(subseq(human_meme$dna,3,3)=="G")
+mean(subseq(human_meme$dna,15,15)=="C")
+temp<-consensusMatrix(human_meme$dna)
+humanMotif<-new("pfm",mat=t(t(temp[1:4,])*1/colSums(temp[1:4,])), name="Human MEME Motif")
+plotMotifLogo(humanMotif)
+writeXStringSet(human_meme$dna,file="human_meme.fa")
+
+
+
+```
+
+Human Peaks
+```{r}
+#download("http://hgdownload.cse.ucsc.edu/goldenPath/hg19/encodeDCC/wgEncodeMapability/wgEncodeDacMapabilityConsensusExcludable.bed.gz", destfile="hg19-blacklist.bed.gz")
+#gunzip("hg19-blacklist.bed.gz")
+hBL<-import("hg19-blacklist.bed")
+
+h1peaks<-read.table("/mnt/afp/micah/R/umn-gcd-bioinformatics-exo/bam/human1_peaks.narrowPeak",stringsAsFactors = FALSE)
+h1<-GRanges(seqnames=h1peaks$V1,ranges = IRanges(start=h1peaks$V2,end=h1peaks$V3),
+            strand="*",score=h1peaks$V5,e=h1peaks$V7,summit=h1peaks$V10)
+length(h1)
+h1<-h1[!h1%over%hBL]
+temp<-ecdf(h1$score)
+plot(ecdf(h1$score),pch=19,cex=0.3)
+abline(v=quantile(m2$score,5/6,type=1),col="red")
+h1top<-h1[h1$score > quantile(h1$score,5/6,type=1)]
+h1summit<-GRanges(seqnames(h1top),IRanges(start=start(h1top)+h1top$summit-50,width=100))
+
+h1summit$dna<-DNAStringSet("NNNN")
+# look through Chromosomes
+for (i in as.character(levels(seqnames(h1summit)))) {
+  idx<-as.logical(seqnames(h1summit)==i)
+h1summit[idx]$dna <- DNAStringSet(Hsapiens[[i]],start=start(h1summit[idx]),end=end(h1summit[idx]))
+}
+
+#h1summit<-extractDNAfromGR(m2summit)
+temp<-h1summit$dna
+names(temp)<-paste0(seqnames(h1summit),":",start(h1summit),"-",end(h1summit))
+writeXStringSet(temp,file="human_summits.fa")
+```
+
+Venn Diagram
+We would like to know it the major peaks we see in human are conserved in mouse and vice-versa.   Make a venn diagram to use as supplemental figure.
+```{r}
+#Move all mouse peaks over to human coordinates
+m2_on_h19<-liftOver(m2,m2h_chain)
+m2_on_h19u<-unlist(m2_on_h19)
+length(h1top) #7593
+length(h1top[h1top %over% m2_on_h19u]) #367
+h_con<-h1top[h1top %over% m2_on_h19u]
+
+h1top_on_m9<-liftOver(h1top,h2m_chain)
+length(h1top)
+temp<-unlist(lapply(h1top_on_m9,length))
+sum(temp!=0) #4188
+
+sum(h1top[temp!=0] %over% m2_on_h19u) #367
+
+#move all human peaks over to mouse coordinates
+h1_on_mm9 <- liftOver(h1,h2m_chain)
+h1_on_mm9u<-unlist(h1_on_mm9)
+length(m2top) #8571
+length(m2top[m2top %over% h1_on_mm9u]) #341
+m_con<-m2top[m2top %over% h1_on_mm9u]
+
+m2top_on_h19<-liftOver(m2top,m2h_chain)
+temp<-unlist(lapply(m2top_on_h19,length))
+sum(temp!=0) #6024
+
+```
+
+4188 of the 7593 peaks in the top sextile of the human chip have known syntenic regions in the mm9 build of the mouse genome.   Of these 4188, only 367 overlap mouse peaks.
+
+6024 of the 8571 peaks in the top sextile of the mouse chip have syntenic regions in the hg19 build of the human genome.  Of these 6024, only 341 overlap human peaks.
+ 
+ 
+
+IUPAC motifs
+```{r}
+temp<-iupac_consensus("GNNACAWTGTNWC")
+tetramerMotif<-new("pfm",mat=t(t(temp[1:4,])*1/colSums(temp[1:4,])), name="Tetramer")
+temp<-iupac_consensus("GNNACAWTGTNGD")
+trimerMotif<-new("pfm",mat=t(t(temp[1:4,])*1/colSums(temp[1:4,])), name="Trimer")
+temp<-iupac_consensus("GNNACAWTHTNN")
+dimerMotif<-new("pfm",mat=t(t(temp[1:4,])*1/colSums(temp[1:4,])), name="Dimer")
+plotMotifLogoStack(list(dimerMotif,trimerMotif,tetramerMotif),ic.scale=FALSE)
+```
+
+DoubleSex & Mab3
+```{r}
+fa<-readDNAStringSet("temp.fa")
+temp<-consensusMatrix(fa)
+InVitroMotif<-new("pfm",mat=t(t(temp[1:4,])*1/colSums(temp[1:4,])), name="InVitroMotif")
+plotMotifLogo(InVitroMotif)
+
+mab3<-readDNAStringSet("../umn-gcd-bioinformatics-exo/mab3.fa")
+temp<-consensusMatrix(mab3)
+mab3Motif<-new("pfm",mat=t(t(temp[1:4,])*1/colSums(temp[1:4,])), name="Mab3 Motif")
+plotMotifLogo(mab3Motif)
+
+dsxf<-readDNAStringSet("dsxf.fa")
+temp<-consensusMatrix(dsxf)
+dsxfMotif<-new("pfm",mat=t(t(temp[1:4,])*1/colSums(temp[1:4,])), name="DSXF Motif")
+plotMotifLogo(dsxfMotif)
+
+plotMotifLogoStack(DNAmotifAlignment(list(humanMotif,mouseMotif,InVitroMotif,mab3Motif,dsxfMotif),revcomp=c(F,F,F,F,F)))
+
+```
+
+```{r}
+system.time(vbDimer_sites <- unlist(GRangesList(bplapply(chroms,function(x) findsites("GNNACAWSHSNND",x)))))
+length(vbDimer_sites)
+temp<-findOverlaps(vbDimer_sites,m[m$score > 50 & m$score2 > 50])
+vbdimer50<-vbDimer_sites[queryHits(temp)]
+length(vbdimer50)
+g1<-pileupGR(vbdimer50+14, "/mnt/afp/murphy/data/mm9/exo_bwa2_r2.bam") + 
+  p+annotate("text", x=0, y = 0, label = "GNNACAWSHSNND") +
+  annotate("text", x=-15, y = 2200, label = paste0(length(vbdimer50)," sites")) 
+
+
+chroms<- as.list(paste0("chr",c(1:19,"X","Y")))
+names(chroms)<-chroms
+system.time(structure <- unlist(GRangesList(bplapply(chroms,function(x) findsites("GATACATTGTTGC",x)))))
+temp<-findOverlaps(structure,m)
+pileupGR(structure[queryHits(temp)]+14, "/mnt/afp/murphy/data/mm9/exo_bwa2_r2.bam") + 
+  annotate("text", x=0, y = 0, label = "GATACATTGTTGC") 
+```
+
+```{r}
+pattern<-"GATACATTGTTGC"
+system.time(structTRI <- unlist(GRangesList(bplapply(chroms,function(x) findsites(pattern,x)))))
+temp<-findOverlaps(structTRI,m)
+tri<-structTRI[queryHits(temp)]+14
+tri<-extractDNAfromGR(tri)
+tri[strand(tri)=="-"]$dna<-reverseComplement(tri[strand(tri)=="-"]$dna)
+tricm<-consensusMatrix(tri$dna)
+trimerMotif<-new("pfm",mat=t(t(tricm[1:4,])*1/colSums(tricm[1:4,])), name="Trimer")
+
+
+tri1<-pileupGR(structTRI[queryHits(temp)]+14, "/mnt/afp/murphy/data/mm9/exo_bwa2_r2.bam") + 
+  annotate("text", x=0, y = 0, label = pattern) +ggtitle("Trimer Chip-Exo") 
+tri2<-pileupGR(structTRI[queryHits(temp)]+14, "/mnt/afp/micah/R/umn-gcd-bioinformatics-exo/bam/111007_L4_R1_Mouse_8w_chip2.bam") + 
+  annotate("text", x=0, y = 0, label = pattern) +ggtitle("Trimer Chip-Seq")
+
+pattern<-"GATACATTGTATC"
+system.time(structTET <- unlist(GRangesList(bplapply(chroms,function(x) findsites(pattern,x)))))
+temp<-findOverlaps(structTET,m)
+
+tet<-structTET[queryHits(temp)]+14
+tet<-extractDNAfromGR(tet)
+tet[strand(tet)=="-"]$dna<-reverseComplement(tet[strand(tet)=="-"]$dna)
+tetcm<-consensusMatrix(tet$dna)
+tetramerMotif<-new("pfm",mat=t(t(tetcm[1:4,])*1/colSums(tetcm[1:4,])), name="Tetramer")
+
+tet1<-pileupGR(structTET[queryHits(temp)]+14, "/mnt/afp/murphy/data/mm9/exo_bwa2_r2.bam") + 
+  annotate("text", x=0, y = 0, label = pattern) +ggtitle("Tetramer Chip-Exo") 
+tet2<-pileupGR(structTET[queryHits(temp)]+14, "/mnt/afp/micah/R/umn-gcd-bioinformatics-exo/bam/111007_L4_R1_Mouse_8w_chip2.bam") + 
+  annotate("text", x=0, y = 0, label = pattern) +ggtitle("Tetramer Chip-Seq")
+
+pdf(file="structural_sites_pileup_T.pdf",width=8.5,height=11,colormodel="cmyk")
+plotMotifLogoStack(list(trimerMotif,tetramerMotif))
+grid.arrange(tri1,tet1,ncol=1,main="ChIP-Exo")
+grid.arrange(tri2,tet2,ncol=1,main="ChIP-Seq")
+dev.off()
+```
+
+```{r}
+D<- temp[temp$pos<11 & temp$pos> -15 & temp$strand=="top",]
+pymol_top<-paste0("alter /dna//D/",D$pos+15,",b=",D$count)
+E<- temp[temp$pos<11 & temp$pos> -15 & temp$strand=="bottom",]
+pymol_bottom<-paste0("alter /dna//E/",26-(E$pos+15),",b=",E$count)
+pymol<-as.data.frame(c(pymol_top,pymol_bottom))
+write.table(pymol,file="pymol.script",quote=F,row.name=F)
+
+```
+
+```{r}
+quickExo<-function(pattern,width=14) {
+system.time(sites <- unlist(GRangesList(bplapply(chroms,function(x) findsites(pattern,x)))))
+temp<-findOverlaps(sites,m)
+sites<-sites[queryHits(temp)]+width
+#tri<-extractDNAfromGR(tri)
+#tri[strand(tri)=="-"]$dna<-reverseComplement(tri[strand(tri)=="-"]$dna)
+#tricm<-consensusMatrix(tri$dna)
+#trimerMotif<-new("pfm",mat=t(t(tricm[1:4,])*1/colSums(tricm[1:4,])), name="Trimer")
+
+g1<-pileupGR(sites, "/mnt/afp/murphy/data/mm9/exo_bwa2_r2.bam") + 
+  theme(legend.position="none") +
+  annotate("text", x=0, y = 0, label = pattern) +ggtitle(as.character(length(sites)))
+g2<-pileupGR(sites, "/mnt/afp/micah/R/umn-gcd-bioinformatics-exo/bam/111007_L4_R1_Mouse_8w_chip2.bam") + 
+  theme(legend.position="none") +
+  annotate("text", x=0, y = 0, label = pattern) +ggtitle(as.character(length(sites)))  
+return(list(g1,g2))
+}
+```
+
+```{r}
+p01<-quickExo("GATACATTGTATC")
+p02<-quickExo("GATACAGTGTATC")
+p03<-quickExo("GATACAWTGTATC")
+p04<-quickExo("GATACASTGTATC")
+
+p11<-quickExo("GATACAWAGTATC")
+p12<-quickExo("GATACAWTGTATC")
+p13<-quickExo("GATACAWGGTATC")
+p14<-quickExo("GATACAWCGTATC")
+
+p21<-quickExo("GATACAWTATATC")
+p22<-quickExo("GATACANTTTATC")
+p23<-quickExo("GATACAWTGTATC")
+p24<-quickExo("GATACAWTCTATC")
+
+p31<-quickExo("GATACAWTGAATC")
+p32<-quickExo("GATACAWTGTATC")
+p33<-quickExo("GATACAWTGGATC")
+p34<-quickExo("GATACAWTGCATC")
+
+p41<-quickExo("GATACAWTGTATC")
+p42<-quickExo("GATACAWTGTTTC")
+p43<-quickExo("GATACAWTGTGTC")
+p44<-quickExo("GATACAWTGTCTC")
+
+p51<-quickExo("GATACAWTGTAAC")
+p52<-quickExo("GATACAWTGTATC")
+p53<-quickExo("GATACAWTGTAGC")
+p54<-quickExo("GATACAWTGTACC")
+
+p61<-quickExo("GATACAWTGTATA")
+p62<-quickExo("GATACAWTGTATT")
+p63<-quickExo("GATACAWTGTATG")
+p64<-quickExo("GATACAWTGTATC")
+```
+
+```{r}
+pdf(file="120414_vb_sequences.pdf",width=8.5,height=11,colormodel="cmyk")
+grid.arrange(p01[[1]],p01[[2]],p02[[1]],p02[[2]],p03[[1]],p03[[2]],p04[[1]],p04[[2]],ncol=2,as.table=TRUE,main="Zero")
+grid.arrange(p11[[1]],p11[[2]],p12[[1]],p12[[2]],p13[[1]],p13[[2]],p14[[1]],p14[[2]],ncol=2,as.table=TRUE,main="One")
+grid.arrange(p21[[1]],p21[[2]],p22[[1]],p22[[2]],p23[[1]],p23[[2]],p24[[1]],p24[[2]],ncol=2,as.table=TRUE,main="Two")
+grid.arrange(p31[[1]],p31[[2]],p32[[1]],p32[[2]],p34[[1]],p34[[2]],ncol=2,as.table=TRUE,main="Three")
+grid.arrange(p41[[1]],p41[[2]],p42[[1]],p42[[2]],p43[[1]],p43[[2]],p44[[1]],p44[[2]],ncol=2,as.table=TRUE,main="Four")
+grid.arrange(p51[[1]],p51[[2]],p52[[1]],p52[[2]],p53[[1]],p53[[2]],p54[[1]],p54[[2]],ncol=2,as.table=TRUE,main="Five")
+grid.arrange(p61[[1]],p61[[2]],p62[[1]],p62[[2]],p63[[1]],p63[[2]],p64[[1]],p64[[2]],ncol=2,as.table=TRUE,main="Six")
+dev.off()
+```
+
+
+
+```{r}
+a<-quickExo("GNNACAWTGTNWC",width=94)
+b<-quickExo("GNNACAWTGTNGD",width=94)
+c<-quickExo("GNNACAWTGTNWD",width=94)
+a2<-quickExo("GNNACAWTGTNWC",width=19)
+b2<-quickExo("GNNACAWTGTNGD",width=19)
+c2<-quickExo("GNNACAWTGTNWD",width=19)
+pdf(file="120614_chip_exo.pdf",width=8.5,height=11,colormodel="cmyk")
+grid.arrange(c[[1]],c[[2]],b[[1]],b[[2]],a[[1]],a[[2]],ncol=2,as.table=TRUE,main="Main, Width=201")
+grid.arrange(c2[[1]],c2[[2]],b2[[1]],b2[[2]],a2[[1]],a2[[2]],ncol=2,as.table=TRUE,main="Sup, Width=51")
+dev.off()
+```
+
+```{r}
+a<-quickExo("GNNACAWTGTNWC",width=19)
+b<-quickExo("GNNACAWTGTNGD",width=19)
+c<-quickExo("GNNACAWTGTNWD",width=19)
+d<-quickExo("GATACATTGTTGC",width=19)
+
+patterns<-c("GNNACAWTGTNWC","GNNACAWTGTNGD","GNNACAWTGTNWD","GATACATTGTTGC")
+patterns<-c("GATACATTGTATC","GATACATTGTTGC","GATACATTGTTAT")
+patterns<-c("GATACATTGTATC","GATACATTGTTGC","GATACATTGTTTT")
+pu1<-quickExo(patterns[[1]],width=19)
+pu2<-quickExo(patterns[[2]],width=19)
+pu3<-quickExo(patterns[[3]],width=19)
+grid.arrange(pu1[[1]],pu2[[1]],pu3[[1]],ncol=1,main="Structure site")
+
+sites<-list()
+motifs<-list()
+u<-list()
+for (p in patterns) {
+  sites[[p]] <- unlist(GRangesList(bplapply(chroms,function(x) findsites(p,x))))
+  temp<-findOverlaps(sites[[p]],m)
+  sites[[p]]<-sites[[p]][queryHits(temp)]+19
+  print(paste0("There are ",length(sites[[p]])," sites for pattern ",p))
+  sites[[p]]<-extractDNAfromGR(sites[[p]])
+  sites[[p]][strand(sites[[p]])=="-"]$dna<-reverseComplement(sites[[p]][strand(sites[[p]])=="-"]$dna)
+  temp2<-consensusMatrix(sites[[p]]$dna)
+  motifs[[p]]<-new("pfm",mat=t(t(temp2[1:4,])*1/colSums(temp2[1:4,])), name=p)
+}
+
+plotMotifLogoStack(motifs)
+grid.arrange(d[[1]],d[[2]],ncol=2,main="Structure site")
+
+
+pdf(file="120614_chip_exo.pdf",width=8.5,height=11,colormodel="cmyk")
+grid.arrange(c[[1]],c[[2]],b[[1]],b[[2]],a[[1]],a[[2]],ncol=2,as.table=TRUE,main="Main, Width=201")
+grid.arrange(c2[[1]],c2[[2]],b2[[1]],b2[[2]],a2[[1]],a2[[2]],ncol=2,as.table=TRUE,main="Sup, Width=51")
+dev.off()
+```
+
+## Gene Expression - 
+```{r}
+sites<-list()
+motifs<-list()
+u<-list()
+patterns<-c("GNNACAWTGTNWC","GNNACAWTGTNGD","GNNACAWTGTNWD")
+for (p in patterns) {
+  sites[[p]] <- unlist(GRangesList(bplapply(chroms,function(x) findsites(p,x))))
+  u[[p]]<-countOverlaps(m2top,sites[[p]])  
+  }
+m2top$class<-"unknown"
+m2top$class[u[[1]]> 0 & u[[2]]==0 & u[[3]]==0]<-"tetramer"
+m2top$class[u[[1]]== 0 & u[[2]]>0 & u[[3]]==0]<-"trimer"
+m2top$class[u[[1]]== 0 & u[[2]]==0 & u[[3]]>0]<-"dimer"
+table(m2top$class)
+
+#annotate tetramers
+m2Tets <- annotatePeakInBatch(as(m2top[m2top$class=="tetramer"], "RangedData"), 
+                              AnnotationData = TSS.mouse.NCBIM37,  output = "both")
+m2Tets <- addGeneIDs(m2Tets, "org.Mm.eg.db", c("entrez_id", "symbol"))
+m2Tets<-m2Tets[m2Tets$distancetoFeature < 1000 & m2Tets$distancetoFeature >  -5000,]
+tetramer_genes<-unique(as.character(m2Tets$entrez_id))
+temp<-unlist(strsplit(tetramer_genes[grep(";",tetramer_genes)],";"))
+tetramer_genes<-c(tetramer_genes[!grepl(";",tetramer_genes)],temp)
+
+#annotate tetramers
+m2Tris <- annotatePeakInBatch(as(m2top[m2top$class=="trimer"], "RangedData"), 
+                              AnnotationData = TSS.mouse.NCBIM37,  output = "both")
+m2Tris <- addGeneIDs(m2Tris, "org.Mm.eg.db", c("entrez_id", "symbol"))
+m2Tris<-m2Tris[m2Tris$distancetoFeature < 1000 & m2Tris$distancetoFeature >  -5000,]
+trimer_genes<-unique(as.character(m2Tris$entrez_id))
+temp<-unlist(strsplit(trimer_genes[grep(";",trimer_genes)],";"))
+trimer_genes<-c(trimer_genes[!grepl(";",trimer_genes)],temp)
+
+#annotate dimers
+m2Dims <- annotatePeakInBatch(as(m2top[m2top$class=="dimer"], "RangedData"), 
+                              AnnotationData = TSS.mouse.NCBIM37,  output = "both")
+m2Dims <- addGeneIDs(m2Dims, "org.Mm.eg.db", c("entrez_id", "symbol"))
+m2Dims<-m2Dims[m2Dims$distancetoFeature < 1000 & m2Dims$distancetoFeature >  -5000,]
+dimer_genes<-unique(as.character(m2Dims$entrez_id))
+temp<-unlist(strsplit(dimer_genes[grep(";",dimer_genes)],";"))
+dimer_genes<-c(dimer_genes[!grepl(";",dimer_genes)],temp)
+
+q4<-setdiff(tetramer_genes,c(trimer_genes,dimer_genes))
+q3<-setdiff(trimer_genes,c(tetramer_genes,dimer_genes))
+q2<-setdiff(dimer_genes,c(tetramer_genes,trimer_genes))
+  
+tT$class<-"unknown"
+tT[tT$Gene.ID %in% q4,"class"]<-"tetramer"
+tT[tT$Gene.ID %in% q3,"class"]<-"trimer"
+tT[tT$Gene.ID %in% q2,"class"]<-"dimer"
+table(tT$class)
+
+ggplot(tT,aes(x=class,y=logFC))+geom_boxplot()+ggtitle("Sf1 - d28")
+t.test(tT[tT$class=="tetramer","logFC"],tT[tT$class=="tetramer","logFC"])
+
+#DHH
+tT2$class<-"unknown"
+tT2[tT2$Gene.ID %in% q4,"class"]<-"tetramer"
+tT2[tT2$Gene.ID %in% q3,"class"]<-"trimer"
+tT2[tT2$Gene.ID %in% q2,"class"]<-"dimer"
+table(tT2$class)
+
+ggplot(tT2,aes(x=class,y=logFC))+geom_boxplot()+ggtitle("Dhh - d28")
+t.test(tT2[tT2$class=="tetramer","logFC"],tT2[tT2$class=="tetramer","logFC"])
+
+
+```
+
+Export Bed files for ngs.plot
+```{r}
+patterns<-c("GNNACAWTGTNWC","GNNACAWTGTNGD","GNNACAWTGTNWD")
+patterns<-c("GNNACAWTGTNSD")
+for (p in patterns) {
+  sites[[p]] <- unlist(GRangesList(bplapply(chroms,function(x) findsites(p,x))))
+  temp<-findOverlaps(sites[[p]],m2top)
+  sites[[p]]<-sites[[p]][queryHits(temp)]+250
+  print(paste0("There are ",length(sites[[p]])," sites for pattern ",p))
+  export(sites[[p]],paste0("/mnt/afp/murphy/paper/",p,".bed"))
+}
+
+```
+
+TSS distance plot
+```{r}
+anno<-list()
+boundsites<-list()
+p<-c("GNNACAWTGTNSD")
+p<-c("GNNACAWTGTNWC")
+sites[[p]] <- unlist(GRangesList(bplapply(chroms,function(x) findsites(p,x))))
+temp<-findOverlaps(sites[[p]],m2top)
+boundsites[[p]]<-sites[[p]][unique(queryHits(temp))]
+print(paste0(length(boundsites[[p]]), " of ",length(sites[[p]]),
+             " sites matching ",p," are bound by high confidence Dmrt1 peaks."))
+export(boundsites[[p]],paste0("/mnt/afp/murphy/data/mm9/",p,".bed"))
+
+#put strand info in metadata column
+#boundsites[[p]]$siteStrand<-strand(boundsites[[p]])
+#head(boundsites[[p]],n=10)
+#table(boundsites[[p]]$siteStrand)
+#strand(boundsites[[p]])<-"*"
+#boundsites[[p]]$label<-paste0(as.character(seqnames(boundsites[[p]])),":",
+#            as.character(start(boundsites[[p]])),"-",
+#            as.character(end(boundsites[[p]])))
+
+temp<-RangedData(seq=as.character(seqnames(boundsites[[p]])),
+                 IRanges(start=start(boundsites[[p]]),end=end(boundsites[[p]])),
+                 strand="*",siteStrand=strand(boundsites[[p]]))
+
+anno[[p]]<- as.data.frame(annotatePeakInBatch(temp, AnnotationData = TSS.mouse.NCBIM37))
+anno[[p]]$peak<-as.integer(anno[[p]]$peak)
+
+
+#put anno data back into boundsites
+
+
+
+anno[[p]]$siteStrand<-as.character(temp$siteStrand[anno[[p]]$peak])
+head(anno[[p]])
+
+table(anno[[p]][abs(anno[[p]]$distancetoFeature)<5000,]$insideFeature)
+
+
+
+
+
+#site and TSS on positive strand
+
+temp<-subset(anno[[p]],(abs(distancetoFeature)<5000),select=c(space,start,end,strand,distancetoFeature,siteStrand,insideFeature))
+nrow(temp)
+
+temp<-subset(anno[[p]],siteStrand=="-" & strand=="-" & abs(distancetoFeature)<5000, select=c(space,start,end,strand,distancetoFeature,siteStrand,insideFeature))
+nrow(temp)
+plot(density(temp))
+
+
+
+(trimerAnno[with(trimerAnno,order(peak)),],n=10)
+temp$distancetoFeature<-trimerAnno[with(trimerAnno,order(peak)),]$distancetoFeature
+temp$featureStrand<-trimerAnno[with(trimerAnno,order(peak)),]$strand
+temp[strand(temp)== "-"]$distancetoFeature <- -1*temp[strand(temp)== "-"]$distancetoFeature
+d1<-density(temp[abs(temp$distancetoFeature)<5000 & temp$featureStrand=="-"]$distancetoFeature)
+d2<-density(temp[abs(temp$distancetoFeature)<5000 & temp$featureStrand=="+"]$distancetoFeature)
+plot(d2)
+
+
+
+```
+
+Want to know what the "best" Sequences are to use for MAb3 Crystalization Trials
+```{r}
+mab3<-readDNAStringSet("../umn-gcd-bioinformatics-exo/mab3_long.fa")
+#mab3<-mab3[1:62]
+temp<-consensusMatrix(mab3)
+mab3Motif<-new("pfm",mat=t(t(temp[1:4,])*1/colSums(temp[1:4,])), name="Mab3 Motif")
+plotMotifLogo(mab3Motif)
+pwm<-PWM(temp)
+mcols(matchPWM(pwm,mab3[[42]],with.score=T))$score
+#lapply(mab3, function(x) mcols(matchPWM(pwm,x,with.score=T))$score)
+#uniqMab3sites <- unique(mab3)
+#mab3seq<-as.data.frame(uniqMab3sites)
+
+mab3seq<-as.data.frame(as.character(mab3))
+#uniqMab3sites<-DNAStringSet(mab3seq$Var1)
+mab3seq$scores<-unlist(lapply(mab3, function(x) mcols(matchPWM(pwm,x,with.score=T))$score))
+
+#make a table of frequencies for the core 14
+mab3core<-subseq(mab3,6,18)
+freqtable<-table(as.character(mab3core))
+mab3seq$corefreq<-freqtable[as.character(mab3core)]
+names(mab3)<-paste0("freq:",mab3seq$corefreq,";Score:",mab3seq$score)
+writeXStringSet(mab3,file="mab3_scored_unique.fasta")
+mab3seq<-mab3seq[with(mab3seq,order(-scores)),]
+mab3_sorted<-DNAStringSet(mab3seq[,1])
+names(mab3_sorted)<-paste0("freq:",mab3seq$corefreq,";Score:",mab3seq$score)
+writeXStringSet(mab3_sorted,file="mab3_scored_sorted.fasta")
+
+GCCTCACATTGCAACATATAGC   AAAACGCAACATT
+mcols(matchPWM(pwm,"GCCTCACATTGCAACATATAGC",with.score=T))$score
+```
+
+Scatterplot h3k4me1 vs h3k27ac
+```{r}
+fls <- list.files("/mnt/afp/murphy/data/mm9/histones", pattern="bam$",full=TRUE)
+bamlst <- BamFileList(fls)
+BiocParallel::register(MulticoreParam(workers=4))
+histone_counts <- summarizeOverlaps(bs+250, bamlst, mode="Union", singleEnd=TRUE, ignore.strand=TRUE)
+temp8<-as.data.frame(assays(histone_counts)$counts)
+temp8$class<-bs$class
+colnames(temp8)<-c("wt.k27ac","wt.k4me1","null.k27ac","null.k4me1","mode")
+temp8$wt.k27ac<-log2(temp8$wt.k27ac+1)
+temp8$wt.k4me1<-log2(temp8$wt.k4me1+1)
+temp8$null.k27ac<-log2(temp8$null.k27ac+1)
+temp8$null.k4me1<-log2(temp8$null.k4me1+1)
+
+ggplot(temp8,aes(x=wt.k27ac,y=wt.k4me1,color=mode))+geom_point()+theme_bw()
+ggplot(temp8,aes(x=wt.k27ac,y=null.k27ac,color=mode))+geom_point()+theme_bw()
+ggplot(temp8,aes(x=null.k27ac,y=null.k4me1,color=mode))+geom_point()+theme_bw()
+ggplot(temp8,aes(x=wt.k4me1,y=null.k4me1,color=mode))+geom_point()+theme_bw()
+
+bs[temp8$wt.k27ac > 6.5 & temp8$null.k27ac <2.5,]
+plotGvizHistone(bs[temp8$wt.k27ac > 6.5 & temp8$null.k27ac <2.5,][2]+2000)
+
+```
+
+It would be nice to make a heatmap with geom_tile instead of having to drop out of R to use NGS.plot
+```{r}
+bs3<-bs[with(bs,order(-wt.k27ac))]+250
+bs3$which_label<-paste0(seqnames(bs3),":",start(bs3),"-",end(bs3))
+bs3<-bs3[!duplicated(bs3$which_label)]
+table(bs3$class)
+p_param <- PileupParam(distinguish_nucleotides=FALSE,
+                       distinguish_strands=FALSE,
+                       min_nucleotide_depth=0)
+sb_param = ScanBamParam(what = c("pos", "rname", "strand","qwidth"), which = bs3,
+                     flag = scanBamFlag(isUnmappedQuery = FALSE))
+
+fl<-"/mnt/afp/murphy/data/mm9/histones/WT-H3K27-acetyl_CAGATC.bam"
+ resW<-pileup(fl, scanBamParam=sb_param, pileupParam=p_param)
+resW$startpos<-resW$pos-as.numeric(swl(resW$which_label))
+resW$count<-log2(resW$count+1)
+levels(resW$which_label)<-bs3$which_label
+
+jBuPuFun <- colorRampPalette(brewer.pal(n = 9, "BuPu"))
+paletteSize <- 256
+jBuPuPalette <- jBuPuFun(paletteSize)
+
+ggplot(resW, aes(x = startpos, y = which_label, fill = count)) +
+theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+      axis.text.y = element_blank(),axis.title.y=element_blank()) +
+geom_tile() +
+scale_fill_gradient2(low = jBuPuPalette[1],
+mid = jBuPuPalette[paletteSize/2],
+high = jBuPuPalette[paletteSize],
+midpoint = (max(resW$count) + min(resW$count)) / 2,
+name = "Counts") + labs(y=NULL)
+
+#STILL NEED TO FIX THE SORTING /LEVELS PROBLEM ALONG Y 
+# AND TRIMER ORIENTATION FLIPPING
+```
+
+The next goal is to see the Genes in the Ovary RNA-Seq data are preferentially associated with trimers or tetramers. 
+```{r}
+
+ensembl = useMart(host = "may2012.archive.ensembl.org", biomart = "ENSEMBL_MART_ENSEMBL", 
+    dataset = "mmusculus_gene_ensembl")
+TSS.ensembl <- getAnnotation(ensembl,featureType=c("TSS"))
+bs2<-c(boundsites[["GNNACAWTGTNWC"]],boundsites[["GNNACAWTGTNSD"]])
+names(bs2)<-1:length(bs2)
+bs2Anno <- annotatePeakInBatch(as(bs2, "RangedData"), AnnotationData = TSS.ensembl)
+bs2Anno$class <- bs2[bs2Anno$peak]$class
+
+bs2Anno$logFC<-cag_dmrt1F_DF[bs2Anno$feature,"log2FoldChange"]
+ggplot(as.data.frame(bs2Anno),aes(x=class,y=logFC))+geom_boxplot()
+t.test(split(bs2Anno$logFC,bs2Anno$class)[[1]],split(bs2Anno$logFC,bs2Anno$class)[[2]])
+```
+
+
+```{r}
+testis_eRNA<-read.table("testis_enhancer.bed",stringsAsFactors=FALSE)
+testis_eRNA<-GRanges(seqnames=testis_eRNA$V1,ranges = IRanges(start=testis_eRNA$V2,end=testis_eRNA$V3), strand="*")
+
+temp<-findOverlaps(c(testis_eRNA,ovary_eRNA),h1top+5000)
+temp<-data.frame(name=paste0(seqnames(h1top[subjectHits(temp)]),":",start(h1top[subjectHits(temp)]),"-",end(h1top[subjectHits(temp)])),score=h1top[subjectHits(temp)]$score)
+temp<-temp[with(temp,order(-score)),]
+
+ovary_eRNA<-read.table("ovary_enhaucer.bed",stringsAsFactors=FALSE)
+ovary_eRNA<-GRanges(seqnames=ovary_eRNA$V1,ranges = IRanges(start=ovary_eRNA$V2,end=ovary_eRNA$V3), strand="*")
+
+temp<-findOverlaps(ovary_eRNA,h1top+1000)
+
+```
+
+Sox9 vs Dmrt1
+```{r}
+sox9_dmrt1<-read.table("testis_enhancer.bed",stringsAsFactors=FALSE)
+testis_eRNA<-GRanges(seqnames=testis_eRNA$V1,ranges = IRanges(start=testis_eRNA$V2,end=testis_eRNA$V3), strand="*")
+
+```
+
+eRNAs
+```{r}
+fls <- list.files("/mnt/afp/murphy/data/mm9/histones", pattern="bam$",full=TRUE)
+bamlst <- BamFileList(fls)
+BiocParallel::register(MulticoreParam(workers=4))
+nullHistone <- summarizeOverlaps(busulfan+50, bamlst, mode="Union", singleEnd=TRUE, ignore.strand=TRUE)
+
+
+busulfan<-read.table("/mnt/afp/murphy/data/mm9/sertoli/busulfan_peaks.narrowPeak",stringsAsFactors = FALSE)
+busulfan<-GRanges(seqnames=busulfan$V1,ranges = IRanges(start=busulfan$V2,end=busulfan$V3),
+            strand="*",score=busulfan$V5,e=busulfan$V7,summit=busulfan$V10)
+busulfan<-busulfan[!busulfan %over% mBL] #removed blacklisted
+busulfan<-keepSeqlevels(busulfan,paste0("chr",c(1:19,"X","Y"))) #remove contigs
+
+busulfan$wl<-paste0(seqnames(busulfan),":",start(busulfan),"-",end(busulfan))
+busulfanAnno <- annotatePeakInBatch(as(busulfan, "RangedData"), AnnotationData = TSS.ensembl)
+#busulfanAnno <- addGeneIDs(busulfanAnno, "org.Mm.eg.db", c("symbol"))
+busulfanAnno$logFC<-cag_dmrt1F_DF[busulfanAnno$feature,"log2FoldChange"]
+busulfanAnno$symbol<-cag_dmrt1F_DF[busulfanAnno$feature,"symbol"]
+busulfanAnno$wl<-paste0("chr",seqnames(busulfanAnno),":",start(busulfanAnno),"-",end(busulfanAnno))
+busulfanAnno<-as.data.frame(busulfanAnno)
+
+idx<-match(busulfan$wl, busulfanAnno$wl)
+#busulfan$AnnoWl<-busulfanAnno[idx,"wl"]
+busulfan$symbol<-busulfanAnno[idx,"symbol"]
+busulfan$logFC<-busulfanAnno[idx,"logFC"]
+table(busulfanAnno$insideFeature)
+
+#busulfanAnno$peak<-as.numeric(busulfanAnno$peak)
+#idx<-match(1:length(busulfan),as.numeric(busulfanAnno$peak))
+#head(idx)
+#busulfan[idx]$logFC<-class(busulfanAnno$logFC)
+#busulfanAnno<-busulfanAnno[with(busulfanAnno,order(peak)),]
+busulfan$logFC<-busulfanAnno$logFC
+#sum(busulfanAnno$peak == 1:14661)
+
+temp<-busulfan[with(busulfan,order(-abs(logFC)))]
+
+fls <- list.files("/mnt/afp/murphy/data/mm9/sertoli/", pattern="Cre.bam$",full=TRUE)
+bamlst <- BamFileList(fls,yieldSize=4e5)
+BiocParallel::register(MulticoreParam(workers=4))
+histone_counts <- summarizeOverlaps(busulfan+50, bamlst, mode="Union", singleEnd=TRUE, ignore.strand=TRUE)
+histone_countsDF<-assays(histone_counts)$counts
+colnames(histone_countsDF)
+plot(log2(histone_countsDF[,3]+1),log2(histone_countsDF[,4]+1),cex=0.25,pch=19)
+busulfan$dhhk27ac<-log2(histone_countsDF[,3]+1)
+busulfan$noCrek27ac<-log2(histone_countsDF[,4]+1)
+
+buPlus<-busulfan+50
+strand(buPlus)<-"+"
+buMinus<-busulfan+50
+strand(buMinus)<-"-"
+fls <- list.files("/mnt/afp/murphy/data/mm9/sertoli/", pattern=glob2rx("*DRR*.bam"),full=TRUE)
+bamlst <- BamFileList(fls,yieldSize=4e5)
+eRNAplus <- summarizeOverlaps(buPlus, bamlst, mode="Union", singleEnd=TRUE, ignore.strand=FALSE)
+eRNAminus <- summarizeOverlaps(buMinus, bamlst, mode="Union", singleEnd=TRUE, ignore.strand=FALSE)
+
+```
+
+Goal find adult dmrt1 peaks that might also be SOx9 peaks
+```{r}
+sox9<-read.table("sox9_mm9.bed")
+sox9_dmrt1<-read.table("dmrt1_sox9_overlap.bed")
+idx<-match(as.numeric(sox9_dmrt1$V10),cag_dmrt1F_DF$ENTREZID)
+sox9_dmrt1$cagFC<-cag_dmrt1F_DF[idx,"log2FoldChange"]
+sox9_dmrt1<-sox9_dmrt1[with(sox9_dmrt1,order(-abs(cagFC))),]
+sox9_dmrt1[1:20,c("V1","V2","V3","V7","V9","cagFC")]
+
+sox9<-import("sox9_mm9.bed")
+length(sox9)
+sox9_busulfan<-sox9[sox9 %over% busulfan]
+length(sox9_busulfan)
+idx<-match(sox9_busulfan$name,cag_dmrt1F_DF$symbol)
+sox9_busulfan$cagFC<-cag_dmrt1F_DF[idx,"log2FoldChange"]
+sox9_busulfan<-sox9_busulfan[with(sox9_busulfan,order(-abs(cagFC)))]
+sox9_busulfan[1:10]
+
+my_dna<-extractDNAfromGR(sox9_busulfan)$dna
+fa<-readDNAStringSet("../umn-gcd-bioinformatics-exo/temp.fa")
+temp<-consensusMatrix(fa)
+pwm<-PWM(temp)
+InVitroMotif<-new("pfm",mat=t(t(temp[1:4,])*1/colSums(temp[1:4,])), name="InVitroMotif")
+plotMotifLogo(InVitroMotif)
+scores<-lapply(my_dna, function(x) mcols(matchPWM(pwm,x,with.score=T))$score)
+scoresRC<-lapply(reverseComplement(my_dna), function(x) mcols(matchPWM(pwm,x,with.score=T))$score)
+sox9_busulfan$site<-sapply(scores,length) + sapply(scoresRC,length)
+mean(sox9_busulfan$site>0)
+
+export(sox9_busulfan,"/mnt/afp/murphy/data/mm9/sertoli/sox9_busulfan.bed")
+write.csv(as.data.frame(sox9_busulfan),file="/mnt/afp/murphy/data/mm9/sertoli/sox9_busulfan.csv",quote=F)
+View(sox9_busulfan)
+```
+
+Next Goal - Find a Sertoli Cell peak that has a change in chromatin and change in Cag-DMRt1 Ovary expression
+```{r}
+dim(histone_countsDF)
+histone_countsDF<-as.data.frame(histone_countsDF)
+#busulfan$wtK27ac<-log2(histone_countsDF$"k27ac_noCre.bam"+1)
+#busulfan$dhhK27ac<-log2(histone_countsDF$"k27ac_dhhCre.bam"+1)
+busulfan$wtK27ac<-histone_countsDF$"k27ac_noCre.bam"
+busulfan$dhhK27ac<-histone_countsDF$"k27ac_dhhCre.bam"
+
+#busulfan$k27ac<-(histone_countsDF$"k27ac_noCre.bam"+1) - (histone_countsDF$"k27ac_dhhCre.bam"+1)
+#busulfan$k27ac<-log2(histone_countsDF$"k27ac_noCre.bam"+1)-log2(histone_countsDF$"k27ac_dhhCre.bam"+1)
+busulfan$k27ac<-busulfan$wtK27ac/(busulfan$dhhK27ac+1)
+  
+temp<-busulfan[with(busulfan,order(-k27ac))]
+temp[10:20]
+```
+
+```{r}
+foxl2<-import("/mnt/afp/murphy/data/mm9/FoxL21_macs14_pe05_peaks.bed")
+temp<-busulfan[!is.na(busulfan$logFC)]
+temp<-temp[with(temp,(dhhk27ac+noCrek27ac) > 5)]
+length(temp)
+temp<- temp[temp$logFC>3 & temp$k27ac > 2]
+length(temp)
+
+
+temp<-busulfan[temp %over% (foxl2+500)]
+length(temp)
+temp <- temp[with(temp,order(-abs(logFC)))]
+temp[1:10]
+
+download("https://s3.msi.umn.edu/dmrt1/esr2_KOvDbl_macs14_pe05_peaks.bed",destfile="esr2_KOvDbl_macs14_pe05_peaks.bed")
+esr_KOvDbl<- import("esr2_KOvDbl_macs14_pe05_peaks.bed")
+temp<-busulfan[busulfan %over% (esr_KOvDbl+500)]
+length(temp)
+temp <- temp[with(temp,order(-abs(logFC)))]
+temp[1:10]
+
+
+```
+
+Find Motifs under sox9_dmrt1 peaks
+```{r}
+sox9_dmrt1<-read.table("dmrt1_sox9_overlap.bed",stringsAsFactors=F)
+sox9_dmrt1<-GRanges(seqnames=sox9_dmrt1$V1,ranges = IRanges(start=sox9_dmrt1$V2,end=sox9_dmrt1$V3),
+            strand="*",name=sox9_dmrt1$V9,wl=paste0(sox9_dmrt1$V1,":",sox9_dmrt1$V2,"-",sox9_dmrt1$V3))
+sox9_dmrt1
+sum(sox9_dmrt1 %over% sites[["GNNACAWTGTNWC"]])
+sum(sox9_dmrt1 %over% sites[["GNNACAWTGTNSD"]])
+sum(sox9_dmrt1 %over% sites[["GNNACAWTGTNWD"]])
+
+dna<-extractDNAfromGR(sox9_dmrt1)$dna
+names(dna)<-sox9_dmrt1$wl
+writeXStringSet(dna,file="sox9_dna.fasta")
+
+pfm.sox9.1 <- new("pfm", mat = query(MotifDb, "sox9")[[1]], name = "site 1")
+pfm.sox9.2 <- new("pfm", mat = query(MotifDb, "sox9")[[3]], name = "site 2")
+plotMotifLogoStack(DNAmotifAlignment(c(pfm.sox9.1, pfm.sox9.2)))
+```
+
+GENE EXPRESSION BOXPLOT
+```{r}
+temp<-cag_dmrt1F_DF
+E13<-import("/mnt/afp/murphy/macs2/master/E13.bed")
+MP9<-import("/mnt/afp/murphy/macs2/master/MP9.bed")
+BSF<-read.table("/mnt/afp/murphy/data/mm9/sertoli/busulfan_peaks.narrowPeak",stringsAsFactors = FALSE)
+BSF<-GRanges(seqnames=BSF$V1,ranges = IRanges(start=BSF$V2,end=BSF$V3), strand="*")
+BSF$name<-"BSF"
+non_germ_dmrt1<-disjoin(c(E13,MP9,BSF))
+non_germ_dmrt1<-non_germ_dmrt1[!non_germ_dmrt1 %over% mBL] #removed blacklisted
+
+non_germ_dmrt1_Anno <-  annotatePeakInBatch(as(non_germ_dmrt1, "RangedData"), AnnotationData = TSS.ensembl, output = "both")
+temp$dmrt1 <- rownames(temp) %in% non_germ_dmrt1_Anno$feature
+#esr22<-import("/mnt/afp/murphy/data/mm9/ESR22_macs14_pe15_peaks.bed")
+
+esr22<-read.table("/mnt/afp/murphy/data/mm9/esr22_macs2_peaks.narrowPeak",stringsAsFactors = FALSE)
+esr22<-GRanges(seqnames=esr22$V1,ranges = IRanges(start=esr22$V2,end=esr22$V3),
+            strand="*",score=esr22$V5,e=esr22$V7,summit=esr22$V10)
+esr22<-esr22[!esr22 %over% mBL]
+esr22Anno <-  annotatePeakInBatch(as(esr22, "RangedData"), AnnotationData = TSS.ensembl, output = "both")
+temp$esr22 <- rownames(temp) %in% esr22Anno$feature
+head(temp)
+sum(temp$dmrt1)
+nrow(temp)
+
+download("https://s3.msi.umn.edu/dmrt1/veitia_foxl2_macs14_pe05_peaks.bed",destfile="veitia_foxl2_macs14_pe05_peaks.bed")
+foxl2<-import("/mnt/afp/murphy/data/mm9/FoxL21_macs14_pe05_peaks.bed")
+foxl2v<-import("veitia_foxl2_macs14_pe05_peaks.bed")
+foxl2<-disjoin(c(foxl2,foxl2v))
+foxl2<-foxl2[!foxl2 %over% mBL]
+foxl2Anno <-  annotatePeakInBatch(as(foxl2, "RangedData"), AnnotationData = TSS.ensembl, output = "both")
+temp$foxl2 <- rownames(temp) %in% foxl2Anno$feature
+sum(temp$foxl2)
+
+temp$group<-"indirect"
+temp[temp$dmrt1 & !temp$esr22 & !temp$foxl2,"group"]<- "dmrt1"
+temp[temp$dmrt1 & temp$esr22 & !temp$foxl2,"group"]<- "dmrt1_esr2"
+temp[temp$dmrt1 & !temp$esr22 & temp$foxl2,"group"]<- "dmrt1_foxl2"
+temp[temp$dmrt1 & temp$esr22 & temp$foxl2,"group"]<-"dmrt1_esr2_foxl2"
+pie(table(temp[abs(temp$log2FoldChange)>2,]$group))
+
+temp %>% 
+  dplyr::select(log2FoldChange,group) %>% 
+  dplyr::filter(log2FoldChange>2) %>% 
+  ggplot(aes(x=group,y=log2FoldChange))+geom_boxplot()
+```
+
+Find some peaks that have strong ESR2 signal in both dmrt1Null and DoubleKO
+```{r}
+fls <- list.files("/mnt/afp/murphy/data/mm9/esr2", pattern="bam$",full=TRUE)
+bamlst <- BamFileList(fls)
+BiocParallel::register(MulticoreParam(workers=4))
+esr22_counts <- summarizeOverlaps(esr22, bamlst, mode="Union", singleEnd=TRUE, ignore.strand=TRUE)
+esr22_countsDF<-as.data.frame(assays(esr22_counts)$counts)
+esr22$d1null<-log2(esr22_countsDF[,1]/0.103548+1)
+esr22$d1raranull<-log2(esr22_countsDF[,2]/0.043464+1)
+esr22$ratio<-esr22$d1null/esr22$d1raranull
+View(esr22[esr22$d1raranull > 8 & esr22$d1null < 2  & esr22$score > 100])
+head(esr22)
+plot(esr22$d1null,esr22$d1raranull)
+abline(0,1)
+identify(esr22$d1null,esr22$d1raranull)
+View(esr22[c(2103,5048,9206,9207,9208,9209,9767,9772)])
+View(esr22[c(1497,2775,4777,5325,7071,7542)])
+
+
+```
+
+
+
+
+
+```{r}
+pfm.sox9.1 <- new("pfm", mat = query(MotifDb, "rara")[[2]], name = "site 1")
+pfm.sox9.2 <- new("pfm", mat = query(MotifDb, "rara")[[11]], name = "site 2")
+plotMotifLogoStack(DNAmotifAlignment(c(pfm.sox9.1, pfm.sox9.2)))
+
+query(MotifDb, "Rara")
+
+
+
+```{r}
+TSS.ensemblGR<-as(TSS.ensembl,"GRanges")
+TSS.ensemblGR<-TSS.ensemblGR[names(TSS.ensemblGR) %in% rownames(cag_dmrt1F_DF[abs(cag_dmrt1F_DF$log2FoldChange) >2,])]
+length(TSS.ensemblGR)
+TSS.ensembl_deg<-as(TSS.ensemblGR,"RangedData")
+
+busulfan_tss_deg <-  annotatePeakInBatch(as(busulfan[busulfan$score > 53], "RangedData"), AnnotationData = TSS.ensembl_deg)
+busulfan_tss_deg<-as.data.frame(busulfan_tss_deg)
+busulfan_tss_deg$wl<-paste0("chr",busulfan_tss_deg$space,":",busulfan_tss_deg$start,"-",busulfan_tss_deg$end)
+busulfan_tss_deg$logFC<-cag_dmrt1F_DF[busulfan_tss_deg$feature,"log2FoldChange"]
+par(mfrow=c(1,1))
+plot(log10(abs(busulfan_tss_deg$shortestDistance)),abs(busulfan_tss_deg$logFC),cex=0.2,pch=19,main="Transcriptional Effect Size vs Distance",xlab="Log10 Distance to Feature",ylab="Abs. Value Log2 Cag-Dmrt1 Ovary")
+abline(v=4,col="blue")
+abline(v=6,col="red")
+
+```
+
