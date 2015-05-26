@@ -1,6 +1,3 @@
-f <- function (x) {
-  print(paste0("Hello ",as.character(x)))
-}
 #FUNCTIONS FOR EXOTOOLS WORKFLOW DEFINED HERE
 
 #BAM IMPORT FOR GVIZ - modified from https://gist.github.com/sidderb/e485c634b386c115b2ef
@@ -121,7 +118,7 @@ plotGviz <- function(mouse_gr) {
   #reduce temp to gene-size chunks
   temp<-reduce(temp,min.gapwidth=10000)
   #if more than one pick one with similar size to mgr
-  temp<-temp[which.min(abs(width(mgr)-width(temp2)))]
+  temp<-temp[which.min(abs(width(mgr)-width(temp)))]
   hseq<-as.character(seqnames(temp))
   hstart<-min(start(temp))
   hend<-max(end(temp))
